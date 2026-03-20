@@ -19,9 +19,7 @@ actor ZipEngine {
             pauseController: pauseController,
             onEvent: { event in
                 switch event {
-                case .evaluating(let item):
-                    await onProgress(item.relativePath)
-                case .ready(let item, _):
+                case .evaluating(let item), .ready(let item, _), .deferred(let item, _):
                     await onProgress(item.relativePath)
                 }
             }

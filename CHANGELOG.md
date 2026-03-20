@@ -26,9 +26,11 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Batch ZIP archives are written to `<source root>/_Materializer_Archives/` instead of being mixed into each source project directory.
 - The UI now exposes stalled-run health signals to make long iCloud operations easier to monitor.
 - Batch runs now prewarm the next project roots and split hydration-heavy directories earlier, so large iCloud trees can use the worker pool more effectively.
+- Hydration workers now rotate slow iCloud items out of hot slots after a short window, cool them down on a retry schedule, and keep other files moving instead of stalling the pipeline.
 - README expanded into an operational guide covering run modes, safety model, runtime artifacts, resume behavior, and repo relocation.
 
 ### Fixed
 - Restored and re-validated the batch queue implementation after workspace recovery.
 - Hardened batch resume so already completed restorable projects can be skipped safely on reruns.
 - Improved batch target naming so naming strategy is explicit and previewed before runs start.
+- Added a planner safety budget so pathological directory shapes cannot leave long batch runs spinning indefinitely in `planningChunks`.

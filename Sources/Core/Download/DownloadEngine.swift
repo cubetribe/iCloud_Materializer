@@ -3,6 +3,7 @@ import Foundation
 struct DownloadEngine: Sendable {
     enum Event: Sendable {
         case evaluating(ScannedItem)
+        case deferred(ScannedItem, retryAfter: Duration)
         case ready(ScannedItem, downloaded: Bool)
     }
 
@@ -22,7 +23,8 @@ struct DownloadEngine: Sendable {
         let sortedItems = configuration.priorityPolicy.sort(items: items)
         var resolvedItems: [String: ScannedItem] = [:]
         var downloadedCount = 0
-        var pendingHydrations: [PendingHydration] = []
+        var hotQueue: [PendingHydration] = []
+        var coolingQueue: [CoolingHydration] = []
 
         for item in sortedItems {
             try await pauseController.checkpoint()
@@ -38,36 +40,42 @@ struct DownloadEngine: Sendable {
             }
 
             let sourceURL = sourceRoot.appendingPathComponent(item.relativePath, isDirectory: item.kind == .directory)
-            pendingHydrations.append(PendingHydration(item: item, sourceURL: sourceURL))
+            hotQueue.append(PendingHydration(item: item, sourceURL: sourceURL))
         }
 
-        var nextPendingIndex = 0
         var inflight: [String: ActiveHydration] = [:]
 
-        while nextPendingIndex < pendingHydrations.count || !inflight.isEmpty {
+        while !hotQueue.isEmpty || !coolingQueue.isEmpty || !inflight.isEmpty {
             try await pauseController.checkpoint()
 
-            while inflight.count < configuration.hydrationWindow, nextPendingIndex < pendingHydrations.count {
-                let pending = pendingHydrations[nextPendingIndex]
-                nextPendingIndex += 1
+            let now = Date()
+            promoteCooledHydrations(into: &hotQueue, coolingQueue: &coolingQueue, now: now)
+
+            while inflight.count < configuration.hydrationWindow, !hotQueue.isEmpty {
+                let pending = hotQueue.removeFirst()
                 await onEvent(.evaluating(pending.item))
                 try? fileManager.startDownloadingUbiquitousItem(at: pending.sourceURL)
                 inflight[pending.item.relativePath] = ActiveHydration(
                     item: pending.item,
                     sourceURL: pending.sourceURL,
-                    startedAt: Date(),
-                    nextPollAt: Date(),
-                    pollAttempt: 0
+                    firstRequestedAt: pending.firstRequestedAt ?? now,
+                    slotStartedAt: now,
+                    nextPollAt: now,
+                    pollAttempt: 0,
+                    restartCount: pending.restartCount
                 )
             }
 
             if inflight.isEmpty {
+                let nextCoolingTime = coolingQueue.map(\.retryAt).min()
+                let sleepSeconds = max(nextCoolingTime?.timeIntervalSinceNow ?? 0.25, 0.25)
+                try await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
                 continue
             }
 
-            let now = Date()
             var madeProgress = false
             var nextPollTime: Date?
+            let queuedWorkExists = !hotQueue.isEmpty || !coolingQueue.isEmpty
 
             for path in inflight.keys.sorted() {
                 guard var active = inflight[path] else { continue }
@@ -88,13 +96,37 @@ struct DownloadEngine: Sendable {
                         continue
                     }
                 } catch {
-                    if now.timeIntervalSince(active.startedAt) >= configuration.maxHydrationWait.timeInterval {
+                    if now.timeIntervalSince(active.firstRequestedAt) >= configuration.maxHydrationWait.timeInterval {
                         throw PipelineError.materializationFailed(active.item.relativePath)
                     }
                 }
 
-                if now.timeIntervalSince(active.startedAt) >= configuration.maxHydrationWait.timeInterval {
+                if now.timeIntervalSince(active.firstRequestedAt) >= configuration.maxHydrationWait.timeInterval {
                     throw PipelineError.materializationFailed(active.item.relativePath)
+                }
+
+                if shouldCool(
+                    active: active,
+                    now: now,
+                    hasQueuedWork: queuedWorkExists,
+                    otherInflightCount: max(inflight.count - 1, 0),
+                    hotSlotDuration: configuration.hydrationHotSlotDuration
+                ) {
+                    let retryAfter = coolingDelay(
+                        forRestartCount: active.restartCount,
+                        schedule: configuration.hydrationCooldownSchedule
+                    )
+                    inflight.removeValue(forKey: path)
+                    coolingQueue.append(CoolingHydration(
+                        item: active.item,
+                        sourceURL: active.sourceURL,
+                        firstRequestedAt: active.firstRequestedAt,
+                        restartCount: active.restartCount + 1,
+                        retryAt: now.addingTimeInterval(retryAfter.timeInterval)
+                    ))
+                    await onEvent(.deferred(active.item, retryAfter: retryAfter))
+                    madeProgress = true
+                    continue
                 }
 
                 let nextDelay = pollDelay(
@@ -109,12 +141,9 @@ struct DownloadEngine: Sendable {
 
             guard !madeProgress else { continue }
 
-            let sleepSeconds: TimeInterval
-            if let nextPollTime {
-                sleepSeconds = max(nextPollTime.timeIntervalSinceNow, 0.25)
-            } else {
-                sleepSeconds = 0.25
-            }
+            let nextCoolingTime = coolingQueue.map(\.retryAt).min()
+            let wakeTimes = [nextPollTime, nextCoolingTime].compactMap { $0 }
+            let sleepSeconds = max((wakeTimes.min()?.timeIntervalSinceNow) ?? 0.25, 0.25)
             try await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
         }
 
@@ -136,17 +165,74 @@ struct DownloadEngine: Sendable {
         let seconds = min(max(unclampedDelay.timeInterval, 0.25), 2.0)
         return .seconds(seconds)
     }
+
+    func coolingDelay(forRestartCount restartCount: Int, schedule: [Duration]) -> Duration {
+        guard !schedule.isEmpty else {
+            return .seconds(60)
+        }
+        let index = min(max(restartCount, 0), schedule.count - 1)
+        let delay = schedule[index]
+        return .seconds(max(delay.timeInterval, 1.0))
+    }
+
+    func shouldCool(
+        active: ActiveHydration,
+        now: Date,
+        hasQueuedWork: Bool,
+        otherInflightCount: Int,
+        hotSlotDuration: Duration
+    ) -> Bool {
+        guard now.timeIntervalSince(active.slotStartedAt) >= hotSlotDuration.timeInterval else {
+            return false
+        }
+        return hasQueuedWork || otherInflightCount > 0
+    }
+
+    private func promoteCooledHydrations(
+        into hotQueue: inout [PendingHydration],
+        coolingQueue: inout [CoolingHydration],
+        now: Date
+    ) {
+        guard !coolingQueue.isEmpty else { return }
+
+        var retained: [CoolingHydration] = []
+        for cooled in coolingQueue {
+            if cooled.retryAt <= now {
+                hotQueue.append(PendingHydration(
+                    item: cooled.item,
+                    sourceURL: cooled.sourceURL,
+                    firstRequestedAt: cooled.firstRequestedAt,
+                    restartCount: cooled.restartCount
+                ))
+            } else {
+                retained.append(cooled)
+            }
+        }
+        coolingQueue = retained
+    }
 }
 
 private struct PendingHydration {
     var item: ScannedItem
     var sourceURL: URL
+    var firstRequestedAt: Date? = nil
+    var restartCount: Int = 0
 }
 
-private struct ActiveHydration {
+struct ActiveHydration: Sendable {
     var item: ScannedItem
     var sourceURL: URL
-    var startedAt: Date
+    var firstRequestedAt: Date
+    var slotStartedAt: Date
     var nextPollAt: Date
     var pollAttempt: Int
+    var restartCount: Int
+}
+
+private struct CoolingHydration {
+    var item: ScannedItem
+    var sourceURL: URL
+    var firstRequestedAt: Date
+    var restartCount: Int
+    var retryAt: Date
 }

@@ -328,6 +328,8 @@ struct JobConfiguration: Sendable {
     var retryCount: Int
     var backoffSchedule: [Duration]
     var maxHydrationWait: Duration
+    var hydrationHotSlotDuration: Duration = .seconds(6)
+    var hydrationCooldownSchedule: [Duration] = [.seconds(15), .seconds(60), .seconds(180)]
     var allowTargetQuarantine: Bool
     var enableFinderFallback: Bool
 

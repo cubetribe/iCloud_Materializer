@@ -359,6 +359,15 @@ final class MaterializerCoordinator: @unchecked Sendable {
                             detail: detail,
                             path: item.relativePath
                         )
+                    case .deferred(let item, let retryAfter):
+                        let retrySeconds = Int(retryAfter.timeInterval.rounded(.up))
+                        try? await tracker.updateWorker(
+                            id: chunk.id,
+                            label: workerLabel,
+                            phase: .materializing,
+                            detail: "Cooling slow iCloud item, retrying in \(retrySeconds)s",
+                            path: item.relativePath
+                        )
                     case .ready(let item, let downloaded):
                         try? await tracker.markDownloadReady(item: item, downloaded: downloaded)
                     }

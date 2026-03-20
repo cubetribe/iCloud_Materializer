@@ -67,6 +67,30 @@ final class ChunkPlannerTests: XCTestCase {
         XCTAssertTrue(chunks.allSatisfy { $0.relativePaths.count <= 2 })
     }
 
+
+    func testPlannerFallsBackToFiniteChunksWhenPlanningBudgetIsExceeded() {
+        let planner = ChunkPlanner(
+            maxFileBatchSize: 500,
+            maxItemsPerChunk: 1,
+            maxExpectedBytesPerChunk: 1,
+            maxPendingHydrationsPerChunk: 0,
+            planningIterationBudgetMultiplier: 0
+        )
+        let items: [ScannedItem] = [
+            directory("workspace"),
+            directory("workspace/level-1"),
+            directory("workspace/level-1/level-2"),
+            directory("workspace/level-1/level-2/level-3"),
+            file("workspace/level-1/level-2/level-3/file.txt", size: 1)
+        ]
+
+        let chunks = planner.plan(items: items)
+
+        XCTAssertFalse(chunks.isEmpty)
+        XCTAssertEqual(Set(chunks.flatMap(\.relativePaths)).count, chunks.flatMap(\.relativePaths).count)
+        XCTAssertTrue(chunks.flatMap(\.relativePaths).contains("workspace/level-1/level-2/level-3/file.txt"))
+    }
+
     private func file(
         _ path: String,
         size: Int64,
