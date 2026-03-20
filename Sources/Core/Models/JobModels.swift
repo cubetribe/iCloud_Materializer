@@ -186,9 +186,13 @@ struct JobConfiguration: Sendable {
     var jobID: UUID
     var sourceURL: URL
     var destinationURL: URL
+    var transferPolicy: TransferPolicy
+    var priorityPolicy: TransferPriorityPolicy
     var workerCount: Int
+    var hydrationWindow: Int
     var retryCount: Int
     var backoffSchedule: [Duration]
+    var maxHydrationWait: Duration
     var allowTargetQuarantine: Bool
     var enableFinderFallback: Bool
 

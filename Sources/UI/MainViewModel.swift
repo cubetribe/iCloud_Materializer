@@ -6,12 +6,17 @@ import Observation
 final class MainViewModel {
     var sourceURL: URL?
     var destinationURL: URL?
+    var transferMode: TransferMode = .exactCopy
+    var priorityMode: TransferPriorityMode = .criticalFirst
+    var customExcludedDirectoryNamesText: String = ""
+    var customExcludedFileExtensionsText: String = ""
     var snapshot: JobSnapshot = .idle(source: nil, destination: nil)
     var activities: [WorkerActivity] = []
     var logs: [LogEntry] = []
     var failures: [FailureRecord] = []
     var pendingConflict: PromotionConflictState?
     var workerCount: Int = 4
+    var hydrationWindow: Int = 12
     var retryCount: Int = 3
 
     private let coordinator = MaterializerCoordinator()
@@ -30,6 +35,18 @@ final class MainViewModel {
 
     var canStart: Bool {
         sourceURL != nil && destinationURL != nil && !isRunning
+    }
+
+    var transferPolicy: TransferPolicy {
+        TransferPolicy(
+            mode: transferMode,
+            customExcludedDirectoryNames: [customExcludedDirectoryNamesText],
+            customExcludedFileExtensions: [customExcludedFileExtensionsText]
+        )
+    }
+
+    var priorityPolicy: TransferPriorityPolicy {
+        TransferPriorityPolicy(mode: priorityMode)
     }
 
     func chooseSourceFolder() {
@@ -113,9 +130,13 @@ final class MainViewModel {
             jobID: UUID(),
             sourceURL: sourceURL,
             destinationURL: destinationURL,
+            transferPolicy: transferPolicy,
+            priorityPolicy: priorityPolicy,
             workerCount: max(2, min(workerCount, 6)),
+            hydrationWindow: max(4, min(hydrationWindow, 24)),
             retryCount: max(1, retryCount),
             backoffSchedule: [.seconds(0), .seconds(2), .seconds(5), .seconds(15)],
+            maxHydrationWait: .seconds(300),
             allowTargetQuarantine: allowTargetQuarantine,
             enableFinderFallback: true
         )

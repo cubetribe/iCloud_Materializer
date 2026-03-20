@@ -4,15 +4,14 @@ struct MainView: View {
     @State private var viewModel = MainViewModel()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            header
-            foldersSection
-            topRow
-            liveProgressSection
-            bottomRow
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                header
+                mainContent
+            }
+            .padding(20)
         }
-        .padding(20)
-        .frame(width: 1280, height: 920)
+        .frame(minWidth: 1280, minHeight: 920)
         .alert("Destination Exists", isPresented: Binding(
             get: { viewModel.pendingConflict != nil },
             set: { if !$0 { viewModel.pendingConflict = nil } }
@@ -65,21 +64,137 @@ struct MainView: View {
         }
     }
 
-    private var topRow: some View {
+    private var mainContent: some View {
         HStack(alignment: .top, spacing: 16) {
-            GroupBox("Telemetry") {
-                VStack(alignment: .leading, spacing: 14) {
-                    metricsGrid
-                    Divider()
-                    chunkGrid
+            VStack(alignment: .leading, spacing: 16) {
+                foldersSection
+                telemetrySection
+                liveProgressSection
+                bottomRow
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            rightRail
+        }
+    }
+
+    private var telemetrySection: some View {
+        GroupBox("Telemetry") {
+            VStack(alignment: .leading, spacing: 14) {
+                metricsGrid
+                Divider()
+                chunkGrid
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var rightRail: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            GroupBox("Transfer Scope") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Mode", selection: $viewModel.transferMode) {
+                        ForEach(TransferMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(viewModel.isRunning)
+
+                    Text(viewModel.transferPolicy.mode.subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Text("Source files are never deleted. This only narrows what gets inventoried and copied for this run.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if viewModel.transferMode == .codingProject {
+                        VStack(alignment: .leading, spacing: 8) {
+                            TextField("Custom excluded directory names, e.g. vendor_cache,temp_env", text: $viewModel.customExcludedDirectoryNamesText)
+                                .textFieldStyle(.roundedBorder)
+                                .disabled(viewModel.isRunning)
+                            TextField("Custom excluded file extensions, e.g. sqlite,db-shm", text: $viewModel.customExcludedFileExtensionsText)
+                                .textFieldStyle(.roundedBorder)
+                                .disabled(viewModel.isRunning)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(viewModel.transferPolicy.ruleDescriptors) { rule in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(rule.title)
+                                    .font(.subheadline.weight(.semibold))
+                                Text(rule.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+
+                    if !viewModel.transferPolicy.ignoredCustomRules.isEmpty {
+                        Divider()
+                        ForEach(viewModel.transferPolicy.ignoredCustomRules, id: \.self) { warning in
+                            Text(warning)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(width: 360, alignment: .leading)
+
+            GroupBox("Copy Priority") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Mode", selection: $viewModel.priorityMode) {
+                        ForEach(TransferPriorityMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(viewModel.isRunning)
+
+                    Text(viewModel.priorityPolicy.mode.subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    Text("Priority never excludes data. Transfer Scope still decides what is included; priority only changes what gets copied first.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(viewModel.priorityPolicy.ruleDescriptors) { rule in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(rule.title)
+                                    .font(.subheadline.weight(.semibold))
+                                Text(rule.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+                .frame(width: 360, alignment: .leading)
             }
 
             GroupBox("Controls") {
                 VStack(alignment: .leading, spacing: 12) {
                     Stepper("Workers: \(viewModel.workerCount)", value: $viewModel.workerCount, in: 2...6)
+                        .disabled(viewModel.isRunning)
+                    Stepper("Hydration Window: \(viewModel.hydrationWindow)", value: $viewModel.hydrationWindow, in: 4...24)
+                        .disabled(viewModel.isRunning)
                     Stepper("Retries: \(viewModel.retryCount)", value: $viewModel.retryCount, in: 1...6)
+                        .disabled(viewModel.isRunning)
+                    Text("Hydration Window controls how many iCloud placeholders each worker may actively trigger and poll in parallel.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Button("Start") { viewModel.start() }
                             .disabled(!viewModel.canStart)
@@ -97,7 +212,7 @@ struct MainView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .frame(width: 280, alignment: .leading)
+                .frame(width: 360, alignment: .leading)
             }
         }
     }

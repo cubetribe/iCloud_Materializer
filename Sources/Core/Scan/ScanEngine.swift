@@ -14,6 +14,7 @@ actor ScanEngine {
 
     func scan(
         sourceRoot: URL,
+        transferPolicy: TransferPolicy,
         onItem: (@Sendable (ScannedItem) async -> Void)? = nil
     ) async throws -> [ScannedItem] {
         guard let enumerator = fileManager.enumerator(
@@ -33,6 +34,15 @@ actor ScanEngine {
             let isDirectory = values.isDirectory ?? false
             let isSymlink = values.isSymbolicLink ?? false
             let kind: ItemKind = isSymlink ? .symlink : (isDirectory ? .directory : .file)
+            switch transferPolicy.scanDecision(relativePath: relativePath, kind: kind) {
+            case .include:
+                break
+            case .excludeItem:
+                continue
+            case .excludeDescendants:
+                enumerator.skipDescendants()
+                continue
+            }
             let isUbiquitous = values.isUbiquitousItem ?? false
             let downloadStatus = values.ubiquitousItemDownloadingStatus
             let fileSize = Int64(values.fileSize ?? 0)

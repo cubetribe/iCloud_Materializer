@@ -49,6 +49,36 @@ actor MaterializerCoordinator {
             )
             await log(
                 .info,
+                configuration.transferPolicy.runtimeSummary,
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate
+            )
+            await log(
+                .info,
+                configuration.priorityPolicy.runtimeSummary,
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate
+            )
+            await log(
+                .info,
+                "Hydration window: \(configuration.hydrationWindow) active iCloud items per worker",
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate
+            )
+            for warning in configuration.transferPolicy.ignoredCustomRules {
+                await log(
+                    .warning,
+                    warning,
+                    jobID: configuration.jobID,
+                    store: store,
+                    onUpdate: onUpdate
+                )
+            }
+            await log(
+                .info,
                 "Scanning source tree",
                 jobID: configuration.jobID,
                 store: store,
@@ -56,17 +86,29 @@ actor MaterializerCoordinator {
                 path: configuration.sourceURL.path
             )
 
-            let items = try await scanEngine.scan(sourceRoot: configuration.sourceURL) { item in
+            let items = try await scanEngine.scan(
+                sourceRoot: configuration.sourceURL,
+                transferPolicy: configuration.transferPolicy
+            ) { item in
                 try? await tracker.scanned(item)
             }
             try await store.saveItems(jobID: configuration.jobID, items: items)
+            if let prioritySummary = configuration.priorityPolicy.inventorySummary(for: items) {
+                await log(
+                    .info,
+                    "Priority inventory: \(prioritySummary)",
+                    jobID: configuration.jobID,
+                    store: store,
+                    onUpdate: onUpdate
+                )
+            }
 
             try await tracker.updateTopLevelPhase(
                 .planningChunks,
                 detail: "Planning chunks",
                 force: true
             )
-            let chunks = chunkPlanner.plan(items: items)
+            let chunks = chunkPlanner.plan(items: items, priorityPolicy: configuration.priorityPolicy)
             try await store.saveChunks(jobID: configuration.jobID, chunks: chunks)
             try await tracker.planned(chunkCount: chunks.count)
             await log(
@@ -309,6 +351,7 @@ actor MaterializerCoordinator {
                 items: report.items,
                 sourceRoot: configuration.sourceURL,
                 stageRoot: stageRoot,
+                priorityPolicy: configuration.priorityPolicy,
                 pauseController: pauseController,
                 onEvent: { event in
                     switch event {

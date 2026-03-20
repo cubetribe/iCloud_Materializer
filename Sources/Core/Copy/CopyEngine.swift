@@ -12,6 +12,7 @@ actor CopyEngine {
         items: [ScannedItem],
         sourceRoot: URL,
         stageRoot: URL,
+        priorityPolicy: TransferPriorityPolicy,
         pauseController: PauseController,
         onEvent: @escaping @Sendable (Event) async -> Void
     ) async throws {
@@ -20,7 +21,7 @@ actor CopyEngine {
         }
         try fileManager.createDirectory(at: stageRoot, withIntermediateDirectories: true)
 
-        let sortedItems = items.sorted(by: itemSortOrder)
+        let sortedItems = priorityPolicy.sort(items: items)
         for item in sortedItems {
             try await pauseController.checkpoint()
             await onEvent(.preparing(item))
@@ -68,26 +69,6 @@ actor CopyEngine {
         }
         if let operationError {
             throw operationError
-        }
-    }
-
-    private func itemSortOrder(lhs: ScannedItem, rhs: ScannedItem) -> Bool {
-        let lhsRank = rank(for: lhs.kind)
-        let rhsRank = rank(for: rhs.kind)
-        if lhsRank == rhsRank {
-            return lhs.relativePath < rhs.relativePath
-        }
-        return lhsRank < rhsRank
-    }
-
-    private func rank(for kind: ItemKind) -> Int {
-        switch kind {
-        case .directory:
-            return 0
-        case .symlink:
-            return 1
-        case .file:
-            return 2
         }
     }
 }

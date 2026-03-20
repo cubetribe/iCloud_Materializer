@@ -5,31 +5,32 @@ struct ChunkPlanner {
     var maxItemsPerChunk: Int = 5_000
     var maxExpectedBytesPerChunk: Int64 = 2 * 1024 * 1024 * 1024
 
-    func plan(items: [ScannedItem]) -> [ChunkManifest] {
-        let nonRootItems = items.filter { $0.pathComponents.count > 1 || $0.kind == .directory && !$0.pathComponents.isEmpty }
-        let rootFiles = items
-            .filter { $0.pathComponents.count == 1 && $0.kind != .directory }
-            .sorted { $0.relativePath < $1.relativePath }
-        let rootDirectories = Set(
-            nonRootItems.compactMap { $0.pathComponents.first }
-        )
+    func plan(items: [ScannedItem], priorityPolicy: TransferPriorityPolicy = .naturalOrder) -> [ChunkManifest] {
+        let rootFiles = items.filter { $0.pathComponents.count == 1 && $0.kind != .directory }
+        let sortedRootFiles = priorityPolicy.sort(items: rootFiles)
+        let rootDirectorySubtrees = makeRootDirectorySubtrees(items: items)
+        let itemMap = Dictionary(uniqueKeysWithValues: items.map { ($0.relativePath, $0) })
 
         var chunks: [ChunkManifest] = []
-        for batch in rootFiles.chunked(into: maxFileBatchSize) {
+        for batch in sortedRootFiles.chunked(into: maxFileBatchSize) {
             chunks.append(makeFileBatch(anchorRelativePath: nil, items: batch))
         }
-        for rootDirectory in rootDirectories.sorted() {
-            let subtree = items.filter { item in
-                item.relativePath == rootDirectory || item.relativePath.hasPrefix(rootDirectory + "/")
-            }
-            chunks.append(contentsOf: splitDirectory(anchorRelativePath: rootDirectory, items: subtree))
+        for rootDirectory in rootDirectorySubtrees.keys.sorted() {
+            guard let subtree = rootDirectorySubtrees[rootDirectory] else { continue }
+            chunks.append(contentsOf: splitDirectory(
+                anchorRelativePath: rootDirectory,
+                items: subtree,
+                priorityPolicy: priorityPolicy
+            ))
         }
-        return chunks.sorted { lhs, rhs in
-            (lhs.anchorRelativePath ?? "") < (rhs.anchorRelativePath ?? "")
-        }
+        return priorityPolicy.sort(chunks: chunks, itemMap: itemMap)
     }
 
-    private func splitDirectory(anchorRelativePath: String, items: [ScannedItem]) -> [ChunkManifest] {
+    private func splitDirectory(
+        anchorRelativePath: String,
+        items: [ScannedItem],
+        priorityPolicy: TransferPriorityPolicy
+    ) -> [ChunkManifest] {
         let expectedBytes = items.expectedBytes
         if items.count <= maxItemsPerChunk && expectedBytes <= maxExpectedBytesPerChunk {
             return [ChunkManifest(
@@ -44,34 +45,36 @@ struct ChunkPlanner {
             )]
         }
 
-        let directFiles = items
-            .filter { $0.kind != .directory && $0.parentRelativePath == anchorRelativePath }
-            .sorted { $0.relativePath < $1.relativePath }
-        let directDirectories = Set(
-            items
-                .compactMap { item -> String? in
-                    guard item.kind == .directory, item.parentRelativePath == anchorRelativePath else { return nil }
-                    return item.relativePath
-                }
-        )
+        let split = splitChildren(of: anchorRelativePath, items: items)
+        let sortedDirectFiles = priorityPolicy.sort(items: split.directFiles)
+        let sortedDirectDirectories = split.directorySubtrees.keys.sorted { lhs, rhs in
+            let lhsBand = priorityPolicy.priority(relativePath: lhs, kind: .directory)
+            let rhsBand = priorityPolicy.priority(relativePath: rhs, kind: .directory)
+            if lhsBand != rhsBand {
+                return lhsBand < rhsBand
+            }
+            return lhs < rhs
+        }
 
-        if directDirectories.isEmpty {
-            return directFiles.chunked(into: maxFileBatchSize).map { batch in
+        if split.directorySubtrees.isEmpty {
+            return sortedDirectFiles.chunked(into: maxFileBatchSize).map { batch in
                 makeFileBatch(anchorRelativePath: anchorRelativePath, items: batch)
             }
         }
 
         var chunks: [ChunkManifest] = []
-        if !directFiles.isEmpty {
-            directFiles.chunked(into: maxFileBatchSize).forEach { batch in
+        if !sortedDirectFiles.isEmpty {
+            sortedDirectFiles.chunked(into: maxFileBatchSize).forEach { batch in
                 chunks.append(makeFileBatch(anchorRelativePath: anchorRelativePath, items: batch))
             }
         }
-        for directory in directDirectories.sorted() {
-            let subtree = items.filter { item in
-                item.relativePath == directory || item.relativePath.hasPrefix(directory + "/")
-            }
-            chunks.append(contentsOf: splitDirectory(anchorRelativePath: directory, items: subtree))
+        for directory in sortedDirectDirectories {
+            guard let subtree = split.directorySubtrees[directory] else { continue }
+            chunks.append(contentsOf: splitDirectory(
+                anchorRelativePath: directory,
+                items: subtree,
+                priorityPolicy: priorityPolicy
+            ))
         }
         return chunks
     }
@@ -88,6 +91,51 @@ struct ChunkPlanner {
             lastError: nil
         )
     }
+
+    private func makeRootDirectorySubtrees(items: [ScannedItem]) -> [String: [ScannedItem]] {
+        var subtrees: [String: [ScannedItem]] = [:]
+        for item in items {
+            guard let rootComponent = item.pathComponents.first else { continue }
+            if item.pathComponents.count == 1 && item.kind != .directory {
+                continue
+            }
+            subtrees[rootComponent, default: []].append(item)
+        }
+        return subtrees
+    }
+
+    private func splitChildren(of anchorRelativePath: String, items: [ScannedItem]) -> SplitChildren {
+        var directFiles: [ScannedItem] = []
+        var directorySubtrees: [String: [ScannedItem]] = [:]
+
+        for item in items {
+            guard let childPath = immediateChildPath(for: item.relativePath, under: anchorRelativePath) else {
+                continue
+            }
+
+            if childPath == item.relativePath, item.kind != .directory {
+                directFiles.append(item)
+            } else {
+                directorySubtrees[childPath, default: []].append(item)
+            }
+        }
+
+        return SplitChildren(directFiles: directFiles, directorySubtrees: directorySubtrees)
+    }
+
+    private func immediateChildPath(for relativePath: String, under anchorRelativePath: String) -> String? {
+        guard relativePath != anchorRelativePath else { return nil }
+        let prefix = anchorRelativePath + "/"
+        guard relativePath.hasPrefix(prefix) else { return nil }
+        let suffix = relativePath.dropFirst(prefix.count)
+        guard let firstComponent = suffix.split(separator: "/").first else { return nil }
+        return anchorRelativePath + "/" + firstComponent
+    }
+}
+
+private struct SplitChildren {
+    var directFiles: [ScannedItem]
+    var directorySubtrees: [String: [ScannedItem]]
 }
 
 private extension Array {
