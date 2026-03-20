@@ -234,6 +234,9 @@ struct BatchProjectPlan: Identifiable, Codable, Hashable, Sendable {
     var targetFolderName: String
     var state: BatchProjectState
     var detail: String?
+    var archiveURL: URL?
+    var deletionManifestURL: URL?
+    var readyForDeletion: Bool
     var startedAt: Date?
     var finishedAt: Date?
 
@@ -253,6 +256,7 @@ struct BatchSnapshot: Codable, Hashable, Sendable {
     var warningProjects: Int
     var failedProjects: Int
     var conflictedProjects: Int
+    var readyForDeletionProjects: Int
     var currentProjectIndex: Int?
     var currentProjectName: String?
     var startedAt: Date?
@@ -271,6 +275,7 @@ struct BatchSnapshot: Codable, Hashable, Sendable {
             warningProjects: 0,
             failedProjects: 0,
             conflictedProjects: 0,
+            readyForDeletionProjects: 0,
             currentProjectIndex: nil,
             currentProjectName: nil,
             startedAt: nil,
@@ -285,6 +290,7 @@ struct JobConfiguration: Sendable {
     var sourceURL: URL
     var destinationURL: URL
     var targetFolderName: String? = nil
+    var finalArchiveURL: URL? = nil
     var transferPolicy: TransferPolicy
     var priorityPolicy: TransferPriorityPolicy
     var workerCount: Int
@@ -324,6 +330,18 @@ struct BatchConfiguration: Sendable {
     var maxHydrationWait: Duration
     var enableFinderFallback: Bool
 
+    var archiveRootURL: URL {
+        sourceRootURL.appendingPathComponent("_Materializer_Archives", isDirectory: true)
+    }
+
+    var deletionManifestRootURL: URL {
+        destinationRootURL
+            .appendingPathComponent(".icloud-materializer", isDirectory: true)
+            .appendingPathComponent("batches", isDirectory: true)
+            .appendingPathComponent(batchID.uuidString, isDirectory: true)
+            .appendingPathComponent("deletion-manifests", isDirectory: true)
+    }
+
     var effectiveSuffix: String {
         let trimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
@@ -343,6 +361,7 @@ struct BatchConfiguration: Sendable {
             sourceURL: plan.sourceURL,
             destinationURL: destinationRootURL,
             targetFolderName: plan.targetFolderName,
+            finalArchiveURL: archiveRootURL.appendingPathComponent("\(plan.sourceFolderName).zip", isDirectory: false),
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
             workerCount: workerCount,
@@ -354,6 +373,18 @@ struct BatchConfiguration: Sendable {
             enableFinderFallback: enableFinderFallback
         )
     }
+}
+
+struct DeletionManifest: Codable, Hashable, Sendable {
+    var batchID: UUID
+    var projectID: UUID
+    var projectName: String
+    var sourceURL: URL
+    var localCopyURL: URL
+    var archiveURL: URL
+    var createdAt: Date
+    var sourceDeleteSuggested: Bool
+    var notes: String
 }
 
 struct WorkingDirectories: Sendable {

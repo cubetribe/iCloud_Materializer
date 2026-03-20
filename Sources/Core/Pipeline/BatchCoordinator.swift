@@ -22,7 +22,7 @@ final class BatchCoordinator: @unchecked Sendable {
         )
 
         let projectRoots = try childURLs
-            .filter { $0.lastPathComponent != ".icloud-materializer" }
+            .filter { $0.lastPathComponent != ".icloud-materializer" && $0.lastPathComponent != "_Materializer_Archives" }
             .filter { url in
                 let values = try url.resourceValues(forKeys: [.isDirectoryKey])
                 return values.isDirectory == true
@@ -47,6 +47,9 @@ final class BatchCoordinator: @unchecked Sendable {
                 targetFolderName: targetFolderName,
                 state: hasConflict ? .conflicted : .pending,
                 detail: hasConflict ? "Target already exists: \(targetURL.path)" : nil,
+                archiveURL: configuration.archiveRootURL.appendingPathComponent("\(projectURL.lastPathComponent).zip", isDirectory: false),
+                deletionManifestURL: configuration.deletionManifestRootURL.appendingPathComponent("\(projectURL.lastPathComponent).json", isDirectory: false),
+                readyForDeletion: false,
                 startedAt: nil,
                 finishedAt: nil
             )
@@ -59,6 +62,7 @@ final class BatchCoordinator: @unchecked Sendable {
         onUpdate: @escaping @Sendable (JobUpdate) async -> Void
     ) async {
         do {
+            try prepareBatchArtifacts(configuration: configuration)
             var projects = try planProjects(configuration: configuration)
             let startedAt = Date()
             await onUpdate(.batchProjects(projects))
@@ -87,10 +91,11 @@ final class BatchCoordinator: @unchecked Sendable {
 
                 let recorder = BatchProjectRecorder()
                 let projectName = projects[index].sourceFolderName
+                let projectConfiguration = configuration.jobConfiguration(for: projects[index])
                 let materializer = coordinatorFactory()
 
                 await materializer.run(
-                    configuration: configuration.jobConfiguration(for: projects[index]),
+                    configuration: projectConfiguration,
                     pauseController: pauseController
                 ) { update in
                     await recorder.record(update)
@@ -99,13 +104,28 @@ final class BatchCoordinator: @unchecked Sendable {
 
                 let outcome = await recorder.outcome()
                 projects[index].finishedAt = Date()
+                projects[index].archiveURL = projectConfiguration.finalArchiveURL
+                projects[index].deletionManifestURL = configuration.deletionManifestRootURL.appendingPathComponent("\(projects[index].sourceFolderName).json", isDirectory: false)
                 projects[index].detail = outcome.lastError ?? outcome.phaseDetail
+                projects[index].readyForDeletion = false
 
                 switch outcome.phase {
                 case .completed:
                     projects[index].state = .completed
+                    try prepareDeletionManifestIfPossible(
+                        for: &projects[index],
+                        outcome: outcome,
+                        configuration: configuration,
+                        localCopyURL: projectConfiguration.visibleTargetURL
+                    )
                 case .completedWithWarnings:
                     projects[index].state = .completedWithWarnings
+                    try prepareDeletionManifestIfPossible(
+                        for: &projects[index],
+                        outcome: outcome,
+                        configuration: configuration,
+                        localCopyURL: projectConfiguration.visibleTargetURL
+                    )
                 case .cancelled:
                     projects[index].state = .cancelled
                     await onUpdate(.batchProjects(projects))
@@ -154,6 +174,7 @@ final class BatchCoordinator: @unchecked Sendable {
                 warningProjects: 0,
                 failedProjects: 0,
                 conflictedProjects: 0,
+                readyForDeletionProjects: 0,
                 currentProjectIndex: nil,
                 currentProjectName: nil,
                 startedAt: Date(),
@@ -172,6 +193,7 @@ final class BatchCoordinator: @unchecked Sendable {
                 warningProjects: 0,
                 failedProjects: 0,
                 conflictedProjects: 0,
+                readyForDeletionProjects: 0,
                 currentProjectIndex: nil,
                 currentProjectName: nil,
                 startedAt: Date(),
@@ -191,6 +213,55 @@ final class BatchCoordinator: @unchecked Sendable {
         if destinationPath.hasPrefix(sourcePath + "/") {
             throw PipelineError.invalidDestination("Batch destination root must not be inside the batch source root.")
         }
+    }
+
+    private func prepareBatchArtifacts(configuration: BatchConfiguration) throws {
+        try fileManager.createDirectory(at: configuration.archiveRootURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: configuration.deletionManifestRootURL, withIntermediateDirectories: true)
+    }
+
+    private func prepareDeletionManifestIfPossible(
+        for project: inout BatchProjectPlan,
+        outcome: (phase: JobPhase, phaseDetail: String?, lastError: String?),
+        configuration: BatchConfiguration,
+        localCopyURL: URL
+    ) throws {
+        guard let archiveURL = project.archiveURL, fileManager.fileExists(atPath: archiveURL.path) else {
+            if project.state == .completed {
+                project.state = .completedWithWarnings
+            }
+            let suffix = "Archive missing; source deletion remains disabled."
+            project.detail = [project.detail, suffix].compactMap { $0 }.joined(separator: "\n")
+            project.readyForDeletion = false
+            return
+        }
+
+        guard let manifestURL = project.deletionManifestURL else {
+            project.readyForDeletion = false
+            return
+        }
+
+        let manifest = DeletionManifest(
+            batchID: configuration.batchID,
+            projectID: project.id,
+            projectName: project.sourceFolderName,
+            sourceURL: project.sourceURL,
+            localCopyURL: localCopyURL,
+            archiveURL: archiveURL,
+            createdAt: Date(),
+            sourceDeleteSuggested: project.state == .completed,
+            notes: project.state == .completed
+                ? "Local copy and external batch archive were created. Source deletion is still manual."
+                : "Archive exists, but the project finished with warnings. Source deletion remains manual and should wait for review."
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(manifest)
+        try data.write(to: manifestURL, options: .atomic)
+        project.readyForDeletion = true
+        project.detail = [project.detail, "Deletion manifest prepared."].compactMap { $0 }.joined(separator: "\n")
     }
 
     private func snapshot(
@@ -214,6 +285,7 @@ final class BatchCoordinator: @unchecked Sendable {
             warningProjects: projects.filter { $0.state == .completedWithWarnings }.count,
             failedProjects: projects.filter { $0.state == .failed || $0.state == .cancelled }.count,
             conflictedProjects: projects.filter { $0.state == .conflicted }.count,
+            readyForDeletionProjects: projects.filter(\.readyForDeletion).count,
             currentProjectIndex: currentProjectIndex,
             currentProjectName: currentProjectName,
             startedAt: startedAt,

@@ -260,6 +260,14 @@ struct MainView: View {
             VStack(alignment: .leading, spacing: 14) {
                 batchMetricsGrid
 
+                if let sourceURL = viewModel.sourceURL {
+                    Text("Batch ZIP archives are written to \(sourceURL.appendingPathComponent("_Materializer_Archives", isDirectory: true).path)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 if viewModel.batchProjects.isEmpty {
                     Text("Choose a batch source root and destination root to preview the queue of direct subfolders.")
                         .foregroundStyle(.secondary)
@@ -419,10 +427,10 @@ struct MainView: View {
                 metricCard("Conflicts", value: "\(viewModel.batchSnapshot.conflictedProjects)")
             }
             GridRow {
+                metricCard("Ready", value: "\(viewModel.batchSnapshot.readyForDeletionProjects)")
                 metricCard("Failed", value: "\(viewModel.batchSnapshot.failedProjects)")
                 metricCard("Batch", value: viewModel.batchSnapshot.state.rawValue)
                 metricCard("Current", value: batchCurrentText)
-                metricCard("Suffix", value: viewModel.batchSnapshot.suffix.isEmpty ? "none" : viewModel.batchSnapshot.suffix)
             }
         }
     }
@@ -502,6 +510,25 @@ struct MainView: View {
                     .font(.caption)
                     .foregroundStyle(project.state == .failed || project.state == .conflicted ? .orange : .secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if project.readyForDeletion {
+                Text("Ready for source deletion review")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.green)
+            }
+            if let archiveURL = project.archiveURL {
+                Text("Archive: \(archiveURL.path)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+            }
+            if let manifestURL = project.deletionManifestURL, project.readyForDeletion {
+                Text("Manifest: \(manifestURL.path)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(2)
             }
             Divider()
         }

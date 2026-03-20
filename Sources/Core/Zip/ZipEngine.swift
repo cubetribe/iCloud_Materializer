@@ -50,7 +50,8 @@ actor ZipEngine {
             throw PipelineError.zipFailed("The archive was created with zero bytes.")
         }
 
-        let finalZipURL = sourceRoot.appendingPathComponent("\(sourceRoot.lastPathComponent).zip", isDirectory: false)
+        let finalZipURL = configuration.finalArchiveURL ?? sourceRoot.appendingPathComponent("\(sourceRoot.lastPathComponent).zip", isDirectory: false)
+        try fileManager.createDirectory(at: finalZipURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         guard !fileManager.fileExists(atPath: finalZipURL.path) else {
             throw PipelineError.zipFailed("A ZIP already exists at \(finalZipURL.path)")
         }

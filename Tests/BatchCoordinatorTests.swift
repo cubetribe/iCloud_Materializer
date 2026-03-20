@@ -13,6 +13,7 @@ final class BatchCoordinatorTests: XCTestCase {
 
         try fileManager.createDirectory(at: sourceRoot.appendingPathComponent("Alpha", isDirectory: true), withIntermediateDirectories: true)
         try fileManager.createDirectory(at: sourceRoot.appendingPathComponent("Beta", isDirectory: true), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: sourceRoot.appendingPathComponent("_Materializer_Archives", isDirectory: true), withIntermediateDirectories: true)
         try Data("ignore me".utf8).write(to: sourceRoot.appendingPathComponent("README.txt", isDirectory: false))
         try fileManager.createDirectory(at: destinationRoot.appendingPathComponent("Beta-Lokal", isDirectory: true), withIntermediateDirectories: true)
 
@@ -80,11 +81,15 @@ final class BatchCoordinatorTests: XCTestCase {
 
         let plans = await recorder.lastBatchProjects()
         XCTAssertEqual(plans.map { $0.state }, [.completed, .completed])
+        XCTAssertTrue(plans.allSatisfy(\.readyForDeletion))
+        XCTAssertTrue(plans.allSatisfy { $0.deletionManifestURL != nil })
 
+        let archiveRoot = sourceRoot.appendingPathComponent("_Materializer_Archives", isDirectory: true)
         XCTAssertTrue(fileManager.fileExists(atPath: destinationRoot.appendingPathComponent("Alpha-Lokal", isDirectory: true).path))
         XCTAssertTrue(fileManager.fileExists(atPath: destinationRoot.appendingPathComponent("Beta-Lokal", isDirectory: true).path))
-        XCTAssertTrue(fileManager.fileExists(atPath: sourceRoot.appendingPathComponent("Alpha/Alpha.zip", isDirectory: false).path))
-        XCTAssertTrue(fileManager.fileExists(atPath: sourceRoot.appendingPathComponent("Beta/Beta.zip", isDirectory: false).path))
+        XCTAssertTrue(fileManager.fileExists(atPath: archiveRoot.appendingPathComponent("Alpha.zip", isDirectory: false).path))
+        XCTAssertTrue(fileManager.fileExists(atPath: archiveRoot.appendingPathComponent("Beta.zip", isDirectory: false).path))
+        XCTAssertTrue(plans.compactMap(\.deletionManifestURL).allSatisfy { fileManager.fileExists(atPath: $0.path) })
     }
 
     private func createFixture(named name: String, in sourceRoot: URL) throws {
