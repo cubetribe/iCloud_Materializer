@@ -12,9 +12,179 @@ final class BatchCoordinator: @unchecked Sendable {
         self.coordinatorFactory = coordinatorFactory
     }
 
-    func planProjects(configuration: BatchConfiguration) throws -> [BatchProjectPlan] {
+    func preview(configuration: BatchConfiguration) throws -> (snapshot: BatchSnapshot, projects: [BatchProjectPlan]) {
         try validateRoots(configuration: configuration)
+        let projects = try mergedProjects(configuration: configuration)
+        let persisted = loadPersistedRun(configuration: configuration)
+        let previewSnapshot = snapshot(
+            for: projects,
+            configuration: configuration,
+            state: .idle,
+            startedAt: persisted?.snapshot.startedAt,
+            finishedAt: persisted?.snapshot.finishedAt,
+            lastError: previewLastError(from: persisted?.snapshot, projects: projects)
+        )
+        return (previewSnapshot, projects)
+    }
 
+    func planProjects(configuration: BatchConfiguration) throws -> [BatchProjectPlan] {
+        try preview(configuration: configuration).projects
+    }
+
+    func run(
+        configuration: BatchConfiguration,
+        pauseController: PauseController,
+        onUpdate: @escaping @Sendable (JobUpdate) async -> Void
+    ) async {
+        var projects: [BatchProjectPlan] = []
+        var startedAt = Date()
+
+        do {
+            try prepareBatchArtifacts(configuration: configuration)
+            let preview = try preview(configuration: configuration)
+            projects = preview.projects
+            startedAt = preview.snapshot.startedAt ?? Date()
+
+            let initialSnapshot = snapshot(
+                for: projects,
+                configuration: configuration,
+                state: .running,
+                startedAt: startedAt
+            )
+            try savePersistedRun(snapshot: initialSnapshot, projects: projects, configuration: configuration)
+            await onUpdate(.batchProjects(projects))
+            await onUpdate(.batchSnapshot(initialSnapshot))
+
+            for index in projects.indices {
+                try await pauseController.checkpoint()
+
+                if shouldSkip(projects[index]) {
+                    continue
+                }
+
+                projects[index].readyForDeletion = false
+                projects[index].state = .running
+                projects[index].startedAt = Date()
+                projects[index].finishedAt = nil
+                projects[index].detail = retryDetail(for: projects[index])
+
+                let runningSnapshot = snapshot(
+                    for: projects,
+                    configuration: configuration,
+                    state: .running,
+                    currentProjectIndex: index + 1,
+                    currentProjectName: projects[index].sourceFolderName,
+                    startedAt: startedAt
+                )
+                try savePersistedRun(snapshot: runningSnapshot, projects: projects, configuration: configuration)
+                await onUpdate(.batchProjects(projects))
+                await onUpdate(.batchSnapshot(runningSnapshot))
+
+                let recorder = BatchProjectRecorder()
+                let projectName = projects[index].sourceFolderName
+                let projectConfiguration = configuration.jobConfiguration(for: projects[index])
+                let materializer = coordinatorFactory()
+
+                await materializer.run(
+                    configuration: projectConfiguration,
+                    pauseController: pauseController
+                ) { update in
+                    await recorder.record(update)
+                    await onUpdate(self.prefixed(update: update, projectName: projectName))
+                }
+
+                let outcome = await recorder.outcome()
+                projects[index].finishedAt = Date()
+                projects[index].archiveURL = projectConfiguration.finalArchiveURL
+                projects[index].deletionManifestURL = configuration.deletionManifestRootURL.appendingPathComponent("\(projects[index].sourceFolderName).json", isDirectory: false)
+                projects[index].detail = outcome.lastError ?? outcome.phaseDetail
+                projects[index].readyForDeletion = false
+
+                switch outcome.phase {
+                case .completed:
+                    projects[index].state = .completed
+                    try prepareDeletionManifestIfPossible(
+                        for: &projects[index],
+                        configuration: configuration,
+                        localCopyURL: projectConfiguration.visibleTargetURL
+                    )
+                case .completedWithWarnings:
+                    projects[index].state = .completedWithWarnings
+                    try prepareDeletionManifestIfPossible(
+                        for: &projects[index],
+                        configuration: configuration,
+                        localCopyURL: projectConfiguration.visibleTargetURL
+                    )
+                case .cancelled:
+                    projects[index].state = .cancelled
+                    let cancelledSnapshot = snapshot(
+                        for: projects,
+                        configuration: configuration,
+                        state: .cancelled,
+                        startedAt: startedAt,
+                        finishedAt: Date(),
+                        lastError: outcome.lastError ?? "Batch run cancelled."
+                    )
+                    try savePersistedRun(snapshot: cancelledSnapshot, projects: projects, configuration: configuration)
+                    await onUpdate(.batchProjects(projects))
+                    await onUpdate(.batchSnapshot(cancelledSnapshot))
+                    return
+                default:
+                    projects[index].state = .failed
+                }
+
+                let loopSnapshot = snapshot(
+                    for: projects,
+                    configuration: configuration,
+                    state: .running,
+                    startedAt: startedAt
+                )
+                try savePersistedRun(snapshot: loopSnapshot, projects: projects, configuration: configuration)
+                await onUpdate(.batchProjects(projects))
+                await onUpdate(.batchSnapshot(loopSnapshot))
+            }
+
+            let finalState = finalState(for: projects)
+            let lastError = projects.first(where: { $0.state == .failed || $0.state == .cancelled })?.detail
+            let finalSnapshot = snapshot(
+                for: projects,
+                configuration: configuration,
+                state: finalState,
+                startedAt: startedAt,
+                finishedAt: Date(),
+                lastError: lastError
+            )
+            try savePersistedRun(snapshot: finalSnapshot, projects: projects, configuration: configuration)
+            await onUpdate(.batchProjects(projects))
+            await onUpdate(.batchSnapshot(finalSnapshot))
+        } catch is CancellationError {
+            let cancelledSnapshot = snapshot(
+                for: projects,
+                configuration: configuration,
+                state: .cancelled,
+                startedAt: startedAt,
+                finishedAt: Date(),
+                lastError: "Batch run cancelled."
+            )
+            try? savePersistedRun(snapshot: cancelledSnapshot, projects: projects, configuration: configuration)
+            await onUpdate(.batchProjects(projects))
+            await onUpdate(.batchSnapshot(cancelledSnapshot))
+        } catch {
+            let failedSnapshot = snapshot(
+                for: projects,
+                configuration: configuration,
+                state: .failed,
+                startedAt: startedAt,
+                finishedAt: Date(),
+                lastError: error.localizedDescription
+            )
+            try? savePersistedRun(snapshot: failedSnapshot, projects: projects, configuration: configuration)
+            await onUpdate(.batchProjects(projects))
+            await onUpdate(.batchSnapshot(failedSnapshot))
+        }
+    }
+
+    private func freshProjects(configuration: BatchConfiguration) throws -> [BatchProjectPlan] {
         let childURLs = try fileManager.contentsOfDirectory(
             at: configuration.sourceRootURL,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -56,151 +226,90 @@ final class BatchCoordinator: @unchecked Sendable {
         }
     }
 
-    func run(
-        configuration: BatchConfiguration,
-        pauseController: PauseController,
-        onUpdate: @escaping @Sendable (JobUpdate) async -> Void
-    ) async {
-        do {
-            try prepareBatchArtifacts(configuration: configuration)
-            var projects = try planProjects(configuration: configuration)
-            let startedAt = Date()
-            await onUpdate(.batchProjects(projects))
-            await onUpdate(.batchSnapshot(snapshot(for: projects, configuration: configuration, state: .running, startedAt: startedAt)))
-
-            for index in projects.indices {
-                try await pauseController.checkpoint()
-
-                guard projects[index].state != .conflicted else {
-                    continue
-                }
-
-                projects[index].state = .running
-                projects[index].startedAt = Date()
-                projects[index].finishedAt = nil
-                projects[index].detail = "Running"
-                await onUpdate(.batchProjects(projects))
-                await onUpdate(.batchSnapshot(snapshot(
-                    for: projects,
-                    configuration: configuration,
-                    state: .running,
-                    currentProjectIndex: index + 1,
-                    currentProjectName: projects[index].sourceFolderName,
-                    startedAt: startedAt
-                )))
-
-                let recorder = BatchProjectRecorder()
-                let projectName = projects[index].sourceFolderName
-                let projectConfiguration = configuration.jobConfiguration(for: projects[index])
-                let materializer = coordinatorFactory()
-
-                await materializer.run(
-                    configuration: projectConfiguration,
-                    pauseController: pauseController
-                ) { update in
-                    await recorder.record(update)
-                    await onUpdate(self.prefixed(update: update, projectName: projectName))
-                }
-
-                let outcome = await recorder.outcome()
-                projects[index].finishedAt = Date()
-                projects[index].archiveURL = projectConfiguration.finalArchiveURL
-                projects[index].deletionManifestURL = configuration.deletionManifestRootURL.appendingPathComponent("\(projects[index].sourceFolderName).json", isDirectory: false)
-                projects[index].detail = outcome.lastError ?? outcome.phaseDetail
-                projects[index].readyForDeletion = false
-
-                switch outcome.phase {
-                case .completed:
-                    projects[index].state = .completed
-                    try prepareDeletionManifestIfPossible(
-                        for: &projects[index],
-                        outcome: outcome,
-                        configuration: configuration,
-                        localCopyURL: projectConfiguration.visibleTargetURL
-                    )
-                case .completedWithWarnings:
-                    projects[index].state = .completedWithWarnings
-                    try prepareDeletionManifestIfPossible(
-                        for: &projects[index],
-                        outcome: outcome,
-                        configuration: configuration,
-                        localCopyURL: projectConfiguration.visibleTargetURL
-                    )
-                case .cancelled:
-                    projects[index].state = .cancelled
-                    await onUpdate(.batchProjects(projects))
-                    await onUpdate(.batchSnapshot(snapshot(
-                        for: projects,
-                        configuration: configuration,
-                        state: .cancelled,
-                        startedAt: startedAt,
-                        finishedAt: Date(),
-                        lastError: outcome.lastError ?? "Batch run cancelled."
-                    )))
-                    return
-                default:
-                    projects[index].state = .failed
-                }
-
-                await onUpdate(.batchProjects(projects))
-                await onUpdate(.batchSnapshot(snapshot(
-                    for: projects,
-                    configuration: configuration,
-                    state: .running,
-                    startedAt: startedAt
-                )))
-            }
-
-            let finalState = finalState(for: projects)
-            let lastError = projects.first(where: { $0.state == .failed || $0.state == .cancelled })?.detail
-            await onUpdate(.batchProjects(projects))
-            await onUpdate(.batchSnapshot(snapshot(
-                for: projects,
-                configuration: configuration,
-                state: finalState,
-                startedAt: startedAt,
-                finishedAt: Date(),
-                lastError: lastError
-            )))
-        } catch is CancellationError {
-            await onUpdate(.batchSnapshot(BatchSnapshot(
-                batchID: configuration.batchID,
-                state: .cancelled,
-                sourceRootPath: configuration.sourceRootURL.path,
-                destinationRootPath: configuration.destinationRootURL.path,
-                suffix: configuration.suffix,
-                totalProjects: 0,
-                completedProjects: 0,
-                warningProjects: 0,
-                failedProjects: 0,
-                conflictedProjects: 0,
-                readyForDeletionProjects: 0,
-                currentProjectIndex: nil,
-                currentProjectName: nil,
-                startedAt: Date(),
-                finishedAt: Date(),
-                lastError: "Batch run cancelled."
-            )))
-        } catch {
-            await onUpdate(.batchSnapshot(BatchSnapshot(
-                batchID: configuration.batchID,
-                state: .failed,
-                sourceRootPath: configuration.sourceRootURL.path,
-                destinationRootPath: configuration.destinationRootURL.path,
-                suffix: configuration.suffix,
-                totalProjects: 0,
-                completedProjects: 0,
-                warningProjects: 0,
-                failedProjects: 0,
-                conflictedProjects: 0,
-                readyForDeletionProjects: 0,
-                currentProjectIndex: nil,
-                currentProjectName: nil,
-                startedAt: Date(),
-                finishedAt: Date(),
-                lastError: error.localizedDescription
-            )))
+    private func mergedProjects(configuration: BatchConfiguration) throws -> [BatchProjectPlan] {
+        let fresh = try freshProjects(configuration: configuration)
+        guard let persisted = loadPersistedRun(configuration: configuration) else {
+            return fresh
         }
+
+        let persistedBySourcePath = Dictionary(uniqueKeysWithValues: persisted.projects.map { ($0.sourceURL.standardizedFileURL.path, $0) })
+        return fresh.map { project in
+            guard let persistedProject = persistedBySourcePath[project.sourceURL.standardizedFileURL.path] else {
+                return project
+            }
+            return merge(fresh: project, persisted: persistedProject)
+        }
+    }
+
+    private func merge(fresh: BatchProjectPlan, persisted: BatchProjectPlan) -> BatchProjectPlan {
+        var merged = fresh
+        merged.id = persisted.id
+        merged.startedAt = persisted.startedAt
+        merged.finishedAt = persisted.finishedAt
+        merged.archiveURL = persisted.archiveURL ?? fresh.archiveURL
+        merged.deletionManifestURL = persisted.deletionManifestURL ?? fresh.deletionManifestURL
+        merged.detail = persisted.detail ?? fresh.detail
+
+        switch persisted.state {
+        case .completed:
+            if isRestorableCompleted(persisted) {
+                merged.state = .completed
+                merged.readyForDeletion = true
+                merged.detail = persisted.detail
+            } else {
+                merged.state = .failed
+                merged.readyForDeletion = false
+                merged.detail = "Persisted completed state is no longer valid. Required target, archive, or deletion manifest is missing; the project will rerun."
+            }
+        case .conflicted:
+            merged.state = fresh.state == .conflicted ? .conflicted : .pending
+            merged.readyForDeletion = false
+            merged.detail = merged.state == .conflicted ? (persisted.detail ?? fresh.detail) : nil
+        case .running:
+            merged.state = .failed
+            merged.readyForDeletion = false
+            merged.detail = "Previous app session ended before this project finished. It will retry on the next batch run."
+        case .completedWithWarnings, .failed, .cancelled:
+            merged.state = persisted.state
+            merged.readyForDeletion = false
+            merged.detail = persisted.detail
+        case .pending:
+            merged.readyForDeletion = false
+        }
+
+        return merged
+    }
+
+    private func shouldSkip(_ project: BatchProjectPlan) -> Bool {
+        project.state == .conflicted || isRestorableCompleted(project)
+    }
+
+    private func retryDetail(for project: BatchProjectPlan) -> String {
+        switch project.state {
+        case .failed:
+            return "Retrying after previous failed attempt"
+        case .cancelled:
+            return "Retrying after previous cancelled attempt"
+        case .completedWithWarnings:
+            return "Retrying project after previous warnings"
+        default:
+            return "Running"
+        }
+    }
+
+    private func previewLastError(from snapshot: BatchSnapshot?, projects: [BatchProjectPlan]) -> String? {
+        if snapshot?.state == .running {
+            return "Previous batch session ended before completion. Finished projects were kept; unfinished projects will retry on the next batch run."
+        }
+        return projects.first(where: { $0.state == .failed })?.detail ?? snapshot?.lastError
+    }
+
+    private func isRestorableCompleted(_ project: BatchProjectPlan) -> Bool {
+        project.state == .completed &&
+        project.readyForDeletion &&
+        fileManager.fileExists(atPath: project.targetURL.path) &&
+        project.archiveURL.map { fileManager.fileExists(atPath: $0.path) } == true &&
+        project.deletionManifestURL.map { fileManager.fileExists(atPath: $0.path) } == true
     }
 
     private func validateRoots(configuration: BatchConfiguration) throws {
@@ -218,11 +327,43 @@ final class BatchCoordinator: @unchecked Sendable {
     private func prepareBatchArtifacts(configuration: BatchConfiguration) throws {
         try fileManager.createDirectory(at: configuration.archiveRootURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: configuration.deletionManifestRootURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: configuration.resumeRootURL, withIntermediateDirectories: true)
+    }
+
+    private func loadPersistedRun(configuration: BatchConfiguration) -> PersistedBatchRun? {
+        guard fileManager.fileExists(atPath: configuration.resumeStateURL.path) else {
+            return nil
+        }
+        do {
+            let data = try Data(contentsOf: configuration.resumeStateURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            return try decoder.decode(PersistedBatchRun.self, from: data)
+        } catch {
+            return nil
+        }
+    }
+
+    private func savePersistedRun(
+        snapshot: BatchSnapshot,
+        projects: [BatchProjectPlan],
+        configuration: BatchConfiguration
+    ) throws {
+        try fileManager.createDirectory(at: configuration.resumeRootURL, withIntermediateDirectories: true)
+        let state = PersistedBatchRun(
+            snapshot: snapshot,
+            projects: projects,
+            updatedAt: Date()
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(state)
+        try data.write(to: configuration.resumeStateURL, options: .atomic)
     }
 
     private func prepareDeletionManifestIfPossible(
         for project: inout BatchProjectPlan,
-        outcome: (phase: JobPhase, phaseDetail: String?, lastError: String?),
         configuration: BatchConfiguration,
         localCopyURL: URL
     ) throws {

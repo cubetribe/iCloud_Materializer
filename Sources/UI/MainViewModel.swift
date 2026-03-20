@@ -163,25 +163,9 @@ final class MainViewModel {
 
         let configuration = makeBatchConfiguration(sourceURL: sourceURL, destinationURL: destinationURL)
         do {
-            batchProjects = try batchCoordinator.planProjects(configuration: configuration)
-            batchSnapshot = BatchSnapshot(
-                batchID: configuration.batchID,
-                state: .idle,
-                sourceRootPath: sourceURL.path,
-                destinationRootPath: destinationURL.path,
-                suffix: batchSuffix,
-                totalProjects: batchProjects.count,
-                completedProjects: 0,
-                warningProjects: 0,
-                failedProjects: 0,
-                conflictedProjects: batchProjects.filter { $0.state == .conflicted }.count,
-                readyForDeletionProjects: 0,
-                currentProjectIndex: nil,
-                currentProjectName: nil,
-                startedAt: nil,
-                finishedAt: nil,
-                lastError: nil
-            )
+            let preview = try batchCoordinator.preview(configuration: configuration)
+            batchProjects = preview.projects
+            batchSnapshot = preview.snapshot
         } catch {
             batchProjects = []
             batchSnapshot = BatchSnapshot(

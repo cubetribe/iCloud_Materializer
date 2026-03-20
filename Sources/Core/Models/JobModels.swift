@@ -334,12 +334,39 @@ struct BatchConfiguration: Sendable {
         sourceRootURL.appendingPathComponent("_Materializer_Archives", isDirectory: true)
     }
 
+    var resumeRootURL: URL {
+        destinationRootURL
+            .appendingPathComponent(".icloud-materializer", isDirectory: true)
+            .appendingPathComponent("batch-resume", isDirectory: true)
+            .appendingPathComponent(resumeKey, isDirectory: true)
+    }
+
+    var resumeStateURL: URL {
+        resumeRootURL.appendingPathComponent("batch-state.json", isDirectory: false)
+    }
+
     var deletionManifestRootURL: URL {
         destinationRootURL
             .appendingPathComponent(".icloud-materializer", isDirectory: true)
             .appendingPathComponent("batches", isDirectory: true)
             .appendingPathComponent(batchID.uuidString, isDirectory: true)
             .appendingPathComponent("deletion-manifests", isDirectory: true)
+    }
+
+    var resumeKey: String {
+        let source = sourceRootURL.standardizedFileURL.path.lowercased()
+        let destination = destinationRootURL.standardizedFileURL.path.lowercased()
+        let suffixPart = effectiveSuffix.lowercased()
+        let payload = "\(source)|\(destination)|\(suffixPart)"
+        return payload
+            .unicodeScalars
+            .map { scalar -> String in
+                if CharacterSet.alphanumerics.contains(scalar) {
+                    return String(scalar)
+                }
+                return "_"
+            }
+            .joined()
     }
 
     var effectiveSuffix: String {
@@ -385,6 +412,12 @@ struct DeletionManifest: Codable, Hashable, Sendable {
     var createdAt: Date
     var sourceDeleteSuggested: Bool
     var notes: String
+}
+
+struct PersistedBatchRun: Codable, Hashable, Sendable {
+    var snapshot: BatchSnapshot
+    var projects: [BatchProjectPlan]
+    var updatedAt: Date
 }
 
 struct WorkingDirectories: Sendable {
