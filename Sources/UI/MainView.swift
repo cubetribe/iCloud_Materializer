@@ -12,6 +12,9 @@ struct MainView: View {
             .padding(20)
         }
         .frame(minWidth: 1280, minHeight: 920)
+        .onChange(of: viewModel.runMode, initial: true) { _, _ in
+            viewModel.rebuildBatchPreview()
+        }
         .alert("Destination Exists", isPresented: Binding(
             get: { viewModel.pendingConflict != nil },
             set: { if !$0 { viewModel.pendingConflict = nil } }
@@ -54,10 +57,10 @@ struct MainView: View {
     private var foldersSection: some View {
         GroupBox("Folders") {
             VStack(alignment: .leading, spacing: 10) {
-                folderRow(title: "Source", path: viewModel.sourceURL?.path) {
+                folderRow(title: viewModel.runMode == .singleProject ? "Source" : "Batch Source Root", path: viewModel.sourceURL?.path) {
                     viewModel.chooseSourceFolder()
                 }
-                folderRow(title: "Destination", path: viewModel.destinationURL?.path) {
+                folderRow(title: viewModel.runMode == .singleProject ? "Destination" : "Batch Destination Root", path: viewModel.destinationURL?.path) {
                     viewModel.chooseDestinationFolder()
                 }
             }
@@ -68,6 +71,9 @@ struct MainView: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 16) {
                 foldersSection
+                if viewModel.runMode == .batchQueue {
+                    batchQueueSection
+                }
                 telemetrySection
                 liveProgressSection
                 bottomRow
@@ -91,6 +97,38 @@ struct MainView: View {
 
     private var rightRail: some View {
         VStack(alignment: .leading, spacing: 16) {
+            GroupBox("Run Mode") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Mode", selection: $viewModel.runMode) {
+                        ForEach(RunMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(viewModel.isRunning)
+
+                    Text(viewModel.runMode.subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if viewModel.runMode == .batchQueue {
+                        TextField("Suffix, e.g. Lokal or Copy", text: $viewModel.batchSuffix)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(viewModel.isRunning)
+                            .onChange(of: viewModel.batchSuffix, initial: false) { _, _ in
+                                viewModel.rebuildBatchPreview()
+                            }
+                        Text(batchSuffixPreviewText)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(width: 360, alignment: .leading)
+
             GroupBox("Transfer Scope") {
                 VStack(alignment: .leading, spacing: 12) {
                     Picker("Mode", selection: $viewModel.transferMode) {
@@ -205,7 +243,7 @@ struct MainView: View {
                     }
                     Button("Export Log") { viewModel.exportLog() }
                         .disabled(viewModel.logs.isEmpty)
-                    if let error = viewModel.snapshot.lastError {
+                    if let error = viewModel.errorText {
                         Text(error)
                             .font(.footnote)
                             .foregroundStyle(.red)
@@ -213,6 +251,30 @@ struct MainView: View {
                     }
                 }
                 .frame(width: 360, alignment: .leading)
+            }
+        }
+    }
+
+    private var batchQueueSection: some View {
+        GroupBox("Batch Queue") {
+            VStack(alignment: .leading, spacing: 14) {
+                batchMetricsGrid
+
+                if viewModel.batchProjects.isEmpty {
+                    Text("Choose a batch source root and destination root to preview the queue of direct subfolders.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            ForEach(viewModel.batchProjects) { project in
+                                batchProjectRow(project)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(minHeight: 220, maxHeight: 320)
+                }
             }
         }
     }
@@ -348,6 +410,23 @@ struct MainView: View {
         }
     }
 
+    private var batchMetricsGrid: some View {
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
+            GridRow {
+                metricCard("Projects", value: "\(viewModel.batchSnapshot.totalProjects)")
+                metricCard("Done", value: "\(viewModel.batchSnapshot.completedProjects)")
+                metricCard("Warnings", value: "\(viewModel.batchSnapshot.warningProjects)")
+                metricCard("Conflicts", value: "\(viewModel.batchSnapshot.conflictedProjects)")
+            }
+            GridRow {
+                metricCard("Failed", value: "\(viewModel.batchSnapshot.failedProjects)")
+                metricCard("Batch", value: viewModel.batchSnapshot.state.rawValue)
+                metricCard("Current", value: batchCurrentText)
+                metricCard("Suffix", value: viewModel.batchSnapshot.suffix.isEmpty ? "none" : viewModel.batchSnapshot.suffix)
+            }
+        }
+    }
+
     private func folderRow(title: String, path: String?, action: @escaping () -> Void) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
@@ -400,6 +479,35 @@ struct MainView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private func batchProjectRow(_ project: BatchProjectPlan) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(project.sourceFolderName)
+                        .font(.headline)
+                    Text(project.targetFolderName)
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                batchStateBadge(project.state)
+            }
+            Text(project.sourceURL.path)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+            if let detail = project.detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(project.state == .failed || project.state == .conflicted ? .orange : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Divider()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private func metricCard(_ title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
@@ -427,6 +535,15 @@ struct MainView: View {
             .padding(.vertical, 4)
             .background(livePhaseColor(for: phase).opacity(0.14), in: Capsule())
             .foregroundStyle(livePhaseColor(for: phase))
+    }
+
+    private func batchStateBadge(_ state: BatchProjectState) -> some View {
+        Text(state.rawValue)
+            .font(.system(.caption, design: .rounded))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(batchStateColor(for: state).opacity(0.14), in: Capsule())
+            .foregroundStyle(batchStateColor(for: state))
     }
 
     private var visibleActivities: [WorkerActivity] {
@@ -476,6 +593,29 @@ struct MainView: View {
         return formattedDuration(seconds)
     }
 
+    private var batchCurrentText: String {
+        guard
+            let index = viewModel.batchSnapshot.currentProjectIndex,
+            let name = viewModel.batchSnapshot.currentProjectName
+        else {
+            return "-"
+        }
+        return "\(index)/\(max(viewModel.batchSnapshot.totalProjects, index)) \(name)"
+    }
+
+    private var batchSuffixPreviewText: String {
+        let trimmed = viewModel.batchSuffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix: String
+        if trimmed.isEmpty {
+            suffix = ""
+        } else if trimmed.hasPrefix("-") || trimmed.hasPrefix("_") || trimmed.hasPrefix(" ") {
+            suffix = trimmed
+        } else {
+            suffix = "-\(trimmed)"
+        }
+        return "Each direct subfolder becomes its own project run. Targets are created under the destination root as `<name>\(suffix)` unless you already include your own leading separator."
+    }
+
     private func formattedBytes(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useMB, .useGB, .useTB]
@@ -520,6 +660,21 @@ struct MainView: View {
             return .blue
         default:
             return .accentColor
+        }
+    }
+
+    private func batchStateColor(for state: BatchProjectState) -> Color {
+        switch state {
+        case .completed:
+            return .green
+        case .completedWithWarnings, .conflicted:
+            return .orange
+        case .failed, .cancelled:
+            return .red
+        case .running:
+            return .blue
+        case .pending:
+            return .secondary
         }
     }
 

@@ -16,6 +16,50 @@ enum JobPhase: String, Codable, Sendable, CaseIterable {
     case cancelled
 }
 
+enum RunMode: String, Codable, Sendable, CaseIterable, Identifiable {
+    case singleProject
+    case batchQueue
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .singleProject:
+            return "Single Project"
+        case .batchQueue:
+            return "Batch Queue"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .singleProject:
+            return "Copy one selected project into a local destination."
+        case .batchQueue:
+            return "Treat each direct subfolder in the selected source root as its own isolated project run."
+        }
+    }
+}
+
+enum BatchState: String, Codable, Sendable, CaseIterable {
+    case idle
+    case running
+    case completed
+    case completedWithWarnings
+    case failed
+    case cancelled
+}
+
+enum BatchProjectState: String, Codable, Sendable, CaseIterable {
+    case pending
+    case running
+    case completed
+    case completedWithWarnings
+    case failed
+    case conflicted
+    case cancelled
+}
+
 enum ItemState: String, Codable, Sendable, CaseIterable {
     case pending
     case downloading
@@ -182,10 +226,65 @@ struct JobSnapshot: Codable, Hashable, Sendable {
     }
 }
 
+struct BatchProjectPlan: Identifiable, Codable, Hashable, Sendable {
+    var id: UUID
+    var sourceURL: URL
+    var destinationRootURL: URL
+    var sourceFolderName: String
+    var targetFolderName: String
+    var state: BatchProjectState
+    var detail: String?
+    var startedAt: Date?
+    var finishedAt: Date?
+
+    var targetURL: URL {
+        destinationRootURL.appendingPathComponent(targetFolderName, isDirectory: true)
+    }
+}
+
+struct BatchSnapshot: Codable, Hashable, Sendable {
+    var batchID: UUID
+    var state: BatchState
+    var sourceRootPath: String
+    var destinationRootPath: String
+    var suffix: String
+    var totalProjects: Int
+    var completedProjects: Int
+    var warningProjects: Int
+    var failedProjects: Int
+    var conflictedProjects: Int
+    var currentProjectIndex: Int?
+    var currentProjectName: String?
+    var startedAt: Date?
+    var finishedAt: Date?
+    var lastError: String?
+
+    static func idle(sourceRoot: URL?, destinationRoot: URL?, suffix: String) -> BatchSnapshot {
+        BatchSnapshot(
+            batchID: UUID(),
+            state: .idle,
+            sourceRootPath: sourceRoot?.path ?? "",
+            destinationRootPath: destinationRoot?.path ?? "",
+            suffix: suffix,
+            totalProjects: 0,
+            completedProjects: 0,
+            warningProjects: 0,
+            failedProjects: 0,
+            conflictedProjects: 0,
+            currentProjectIndex: nil,
+            currentProjectName: nil,
+            startedAt: nil,
+            finishedAt: nil,
+            lastError: nil
+        )
+    }
+}
+
 struct JobConfiguration: Sendable {
     var jobID: UUID
     var sourceURL: URL
     var destinationURL: URL
+    var targetFolderName: String? = nil
     var transferPolicy: TransferPolicy
     var priorityPolicy: TransferPriorityPolicy
     var workerCount: Int
@@ -197,7 +296,7 @@ struct JobConfiguration: Sendable {
     var enableFinderFallback: Bool
 
     var visibleTargetURL: URL {
-        destinationURL.appendingPathComponent(sourceURL.lastPathComponent, isDirectory: true)
+        destinationURL.appendingPathComponent(targetFolderName ?? sourceURL.lastPathComponent, isDirectory: true)
     }
 
     var workingRootURL: URL {
@@ -208,6 +307,52 @@ struct JobConfiguration: Sendable {
 
     var databaseURL: URL {
         workingRootURL.appendingPathComponent("state.sqlite", isDirectory: false)
+    }
+}
+
+struct BatchConfiguration: Sendable {
+    var batchID: UUID
+    var sourceRootURL: URL
+    var destinationRootURL: URL
+    var suffix: String
+    var transferPolicy: TransferPolicy
+    var priorityPolicy: TransferPriorityPolicy
+    var workerCount: Int
+    var hydrationWindow: Int
+    var retryCount: Int
+    var backoffSchedule: [Duration]
+    var maxHydrationWait: Duration
+    var enableFinderFallback: Bool
+
+    var effectiveSuffix: String {
+        let trimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if trimmed.hasPrefix("-") || trimmed.hasPrefix("_") || trimmed.hasPrefix(" ") {
+            return trimmed
+        }
+        return "-\(trimmed)"
+    }
+
+    func targetFolderName(for projectName: String) -> String {
+        projectName + effectiveSuffix
+    }
+
+    func jobConfiguration(for plan: BatchProjectPlan) -> JobConfiguration {
+        JobConfiguration(
+            jobID: UUID(),
+            sourceURL: plan.sourceURL,
+            destinationURL: destinationRootURL,
+            targetFolderName: plan.targetFolderName,
+            transferPolicy: transferPolicy,
+            priorityPolicy: priorityPolicy,
+            workerCount: workerCount,
+            hydrationWindow: hydrationWindow,
+            retryCount: retryCount,
+            backoffSchedule: backoffSchedule,
+            maxHydrationWait: maxHydrationWait,
+            allowTargetQuarantine: false,
+            enableFinderFallback: enableFinderFallback
+        )
     }
 }
 
@@ -224,6 +369,8 @@ enum JobUpdate: Sendable {
     case log(LogEntry)
     case failures([FailureRecord])
     case activities([WorkerActivity])
+    case batchSnapshot(BatchSnapshot)
+    case batchProjects([BatchProjectPlan])
 }
 
 struct PromotionConflictState: Identifiable, Sendable {

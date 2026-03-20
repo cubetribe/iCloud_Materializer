@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		02976F7A31A30AEF56400048 /* JobStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24BA13DD00EEA77F8DEC5A70 /* JobStoreTests.swift */; };
 		0BACCE8251F9964F30EBE60A /* PipelineError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9369E7027AA5D022EC216AB2 /* PipelineError.swift */; };
+		1230ABD9384CEEFE19541E9F /* BatchCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DACA3E173CA94BA250651B2 /* BatchCoordinatorTests.swift */; };
 		264D6171078A7EE315E96DBA /* MaterializerCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F3D8D519397656944135645 /* MaterializerCoordinatorTests.swift */; };
 		269A5233693B6FFC6BCB3515 /* FolderAccessManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A166036201DFB64FCB466F7D /* FolderAccessManager.swift */; };
 		308A6426116F098F25FB20C9 /* ChunkPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498B95691163A19854ADCD47 /* ChunkPlannerTests.swift */; };
@@ -29,6 +30,7 @@
 		973004EEE26E97116EE56E10 /* MainViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01C43F99D502B668CB78F0B5 /* MainViewModel.swift */; };
 		9BB0548615450951EC09DE12 /* TransferPriorityPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7F672BC23BD1E3E150820E5 /* TransferPriorityPolicyTests.swift */; };
 		B4F4A0F8CE1CE285E2F591C3 /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8143776CC59AC2647BD03BC3 /* MainView.swift */; };
+		B75AF94AB71C7232717AEED9 /* BatchCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C6A010A08A2D7358D0049C7 /* BatchCoordinator.swift */; };
 		D02351E9BB5AA9567C97812A /* JobStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 754B4B5E530B90690DB02E06 /* JobStore.swift */; };
 		D53EC15AA53F4D0619D63854 /* MaterializerCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90D3563BCCDEF33C52AF39D9 /* MaterializerCoordinator.swift */; };
 		DABC699DA49D7B91BDF214C9 /* TransferPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B444C7FD975FC55DEEAAACDC /* TransferPolicyTests.swift */; };
@@ -67,11 +69,13 @@
 		6EAC89D9501B6BA29E255EC3 /* AppLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogger.swift; sourceTree = "<group>"; };
 		754B4B5E530B90690DB02E06 /* JobStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobStore.swift; sourceTree = "<group>"; };
 		77D416F455BFE4454D932FDB /* PauseController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PauseController.swift; sourceTree = "<group>"; };
+		7DACA3E173CA94BA250651B2 /* BatchCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchCoordinatorTests.swift; sourceTree = "<group>"; };
 		8143776CC59AC2647BD03BC3 /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		83839E93A5012A4E00DE5240 /* ScanEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanEngine.swift; sourceTree = "<group>"; };
 		83D650A71715BB416EF98315 /* iCloudMaterializer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = iCloudMaterializer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		90D3563BCCDEF33C52AF39D9 /* MaterializerCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaterializerCoordinator.swift; sourceTree = "<group>"; };
 		9369E7027AA5D022EC216AB2 /* PipelineError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PipelineError.swift; sourceTree = "<group>"; };
+		9C6A010A08A2D7358D0049C7 /* BatchCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchCoordinator.swift; sourceTree = "<group>"; };
 		A166036201DFB64FCB466F7D /* FolderAccessManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderAccessManager.swift; sourceTree = "<group>"; };
 		A37BC611365F3FFE1F9DCE4F /* iCloudMaterializerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iCloudMaterializerApp.swift; sourceTree = "<group>"; };
 		B2851A9A4F4251F075B2C8D9 /* DownloadEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadEngineTests.swift; sourceTree = "<group>"; };
@@ -145,6 +149,7 @@
 		3D97593AC9BD258D8EB8154C /* Pipeline */ = {
 			isa = PBXGroup;
 			children = (
+				9C6A010A08A2D7358D0049C7 /* BatchCoordinator.swift */,
 				90D3563BCCDEF33C52AF39D9 /* MaterializerCoordinator.swift */,
 				77D416F455BFE4454D932FDB /* PauseController.swift */,
 				9369E7027AA5D022EC216AB2 /* PipelineError.swift */,
@@ -156,6 +161,7 @@
 		4802A3972E9128578D72DC37 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				7DACA3E173CA94BA250651B2 /* BatchCoordinatorTests.swift */,
 				498B95691163A19854ADCD47 /* ChunkPlannerTests.swift */,
 				B2851A9A4F4251F075B2C8D9 /* DownloadEngineTests.swift */,
 				24BA13DD00EEA77F8DEC5A70 /* JobStoreTests.swift */,
@@ -329,6 +335,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				599F2D5B3D342BA6CE9BE50D /* AppLogger.swift in Sources */,
+				B75AF94AB71C7232717AEED9 /* BatchCoordinator.swift in Sources */,
 				E63C7B966D3419EF91C8DCC5 /* ChunkPlanner.swift in Sources */,
 				635F6F103811B1E89C35B26E /* CopyEngine.swift in Sources */,
 				91EDE725833181BC196D96CC /* DownloadEngine.swift in Sources */,
@@ -356,6 +363,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1230ABD9384CEEFE19541E9F /* BatchCoordinatorTests.swift in Sources */,
 				308A6426116F098F25FB20C9 /* ChunkPlannerTests.swift in Sources */,
 				926F875AF14DA00BBE23F48A /* DownloadEngineTests.swift in Sources */,
 				02976F7A31A30AEF56400048 /* JobStoreTests.swift in Sources */,

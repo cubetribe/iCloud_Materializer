@@ -115,7 +115,7 @@ private actor UpdateRecorder {
             snapshots.append(snapshot)
         case .log(let entry):
             logs.append(entry)
-        case .failures, .activities:
+        case .failures, .activities, .batchSnapshot, .batchProjects:
             break
         }
     }

@@ -6,11 +6,15 @@ import Observation
 final class MainViewModel {
     var sourceURL: URL?
     var destinationURL: URL?
+    var runMode: RunMode = .singleProject
     var transferMode: TransferMode = .exactCopy
     var priorityMode: TransferPriorityMode = .criticalFirst
+    var batchSuffix: String = "Lokal"
     var customExcludedDirectoryNamesText: String = ""
     var customExcludedFileExtensionsText: String = ""
     var snapshot: JobSnapshot = .idle(source: nil, destination: nil)
+    var batchSnapshot: BatchSnapshot = .idle(sourceRoot: nil, destinationRoot: nil, suffix: "Lokal")
+    var batchProjects: [BatchProjectPlan] = []
     var activities: [WorkerActivity] = []
     var logs: [LogEntry] = []
     var failures: [FailureRecord] = []
@@ -18,13 +22,18 @@ final class MainViewModel {
     var workerCount: Int = 4
     var hydrationWindow: Int = 12
     var retryCount: Int = 3
+    var isPaused = false
 
     private let coordinator = MaterializerCoordinator()
+    private let batchCoordinator = BatchCoordinator()
     private var pauseController: PauseController?
     private var jobTask: Task<Void, Never>?
     private let maxLogEntries = 400
 
     var isRunning: Bool {
+        if batchSnapshot.state == .running {
+            return true
+        }
         switch snapshot.phase {
         case .idle, .completed, .completedWithWarnings, .failed, .cancelled:
             return false
@@ -35,6 +44,10 @@ final class MainViewModel {
 
     var canStart: Bool {
         sourceURL != nil && destinationURL != nil && !isRunning
+    }
+
+    var errorText: String? {
+        batchSnapshot.lastError ?? snapshot.lastError
     }
 
     var transferPolicy: TransferPolicy {
@@ -51,16 +64,20 @@ final class MainViewModel {
 
     func chooseSourceFolder() {
         sourceURL = FolderAccessManager.selectFolder(
-            title: "Choose iCloud Source Folder",
-            message: "Select the iCloud Drive project folder to materialize."
+            title: runMode == .singleProject ? "Choose iCloud Source Folder" : "Choose Batch Source Root",
+            message: runMode == .singleProject
+                ? "Select the iCloud Drive project folder to materialize."
+                : "Select the root folder whose direct subfolders should each run as their own project."
         )
         refreshIdleSnapshot()
     }
 
     func chooseDestinationFolder() {
         destinationURL = FolderAccessManager.selectFolder(
-            title: "Choose Local Destination Folder",
-            message: "Select a local destination outside iCloud Drive."
+            title: runMode == .singleProject ? "Choose Local Destination Folder" : "Choose Batch Destination Root",
+            message: runMode == .singleProject
+                ? "Select a local destination outside iCloud Drive."
+                : "Select the local root where the suffixed batch project copies should be created."
         )
         refreshIdleSnapshot()
     }
@@ -70,30 +87,35 @@ final class MainViewModel {
             snapshot.lastError = PipelineError.missingFolderSelection.localizedDescription
             return
         }
-        let existingTarget = destinationURL.appendingPathComponent(sourceURL.lastPathComponent, isDirectory: true)
-        if FileManager.default.fileExists(atPath: existingTarget.path) {
-            pendingConflict = PromotionConflictState(existingTarget: existingTarget)
-            return
+
+        switch runMode {
+        case .singleProject:
+            let existingTarget = destinationURL.appendingPathComponent(sourceURL.lastPathComponent, isDirectory: true)
+            if FileManager.default.fileExists(atPath: existingTarget.path) {
+                pendingConflict = PromotionConflictState(existingTarget: existingTarget)
+                return
+            }
+            startSingleRun(sourceURL: sourceURL, destinationURL: destinationURL, allowTargetQuarantine: false)
+        case .batchQueue:
+            startBatchRun(sourceURL: sourceURL, destinationURL: destinationURL)
         }
-        startRun(allowTargetQuarantine: false)
     }
 
     func startAfterQuarantineApproval() {
         pendingConflict = nil
-        startRun(allowTargetQuarantine: true)
+        guard let sourceURL, let destinationURL else { return }
+        startSingleRun(sourceURL: sourceURL, destinationURL: destinationURL, allowTargetQuarantine: true)
     }
 
     func pauseOrResume() {
-        guard let pauseController else { return }
-        if snapshot.phase == .materializing || snapshot.phase == .copying || snapshot.phase == .verifyingChunks || snapshot.phase == .promoting || snapshot.phase == .zipping || snapshot.phase == .scanning || snapshot.phase == .planningChunks || snapshot.phase == .finalVerifying {
-            Task {
-                if isPaused {
-                    await pauseController.resume()
-                    isPaused = false
-                } else {
-                    await pauseController.pause()
-                    isPaused = true
-                }
+        guard let pauseController, isRunning else { return }
+        Task {
+            if isPaused {
+                await pauseController.resume()
+                isPaused = false
+            } else {
+                await pauseController.pause()
+                isPaused = true
             }
         }
     }
@@ -122,10 +144,61 @@ final class MainViewModel {
         }
     }
 
-    var isPaused = false
+    func rebuildBatchPreview() {
+        guard runMode == .batchQueue else {
+            batchProjects = []
+            batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
+            return
+        }
+        guard let sourceURL, let destinationURL else {
+            batchProjects = []
+            batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
+            return
+        }
 
-    private func startRun(allowTargetQuarantine: Bool) {
-        guard let sourceURL, let destinationURL else { return }
+        let configuration = makeBatchConfiguration(sourceURL: sourceURL, destinationURL: destinationURL)
+        do {
+            batchProjects = try batchCoordinator.planProjects(configuration: configuration)
+            batchSnapshot = BatchSnapshot(
+                batchID: configuration.batchID,
+                state: .idle,
+                sourceRootPath: sourceURL.path,
+                destinationRootPath: destinationURL.path,
+                suffix: batchSuffix,
+                totalProjects: batchProjects.count,
+                completedProjects: 0,
+                warningProjects: 0,
+                failedProjects: 0,
+                conflictedProjects: batchProjects.filter { $0.state == .conflicted }.count,
+                currentProjectIndex: nil,
+                currentProjectName: nil,
+                startedAt: nil,
+                finishedAt: nil,
+                lastError: nil
+            )
+        } catch {
+            batchProjects = []
+            batchSnapshot = BatchSnapshot(
+                batchID: configuration.batchID,
+                state: .idle,
+                sourceRootPath: sourceURL.path,
+                destinationRootPath: destinationURL.path,
+                suffix: batchSuffix,
+                totalProjects: 0,
+                completedProjects: 0,
+                warningProjects: 0,
+                failedProjects: 0,
+                conflictedProjects: 0,
+                currentProjectIndex: nil,
+                currentProjectName: nil,
+                startedAt: nil,
+                finishedAt: nil,
+                lastError: error.localizedDescription
+            )
+        }
+    }
+
+    private func startSingleRun(sourceURL: URL, destinationURL: URL, allowTargetQuarantine: Bool) {
         let configuration = JobConfiguration(
             jobID: UUID(),
             sourceURL: sourceURL,
@@ -140,19 +213,55 @@ final class MainViewModel {
             allowTargetQuarantine: allowTargetQuarantine,
             enableFinderFallback: true
         )
-        logs.removeAll()
-        activities.removeAll()
-        failures.removeAll()
-        snapshot = .idle(source: sourceURL, destination: destinationURL)
+        prepareForRun(sourceURL: sourceURL, destinationURL: destinationURL)
         snapshot.jobID = configuration.jobID
-        pauseController = PauseController()
-        isPaused = false
         jobTask = Task {
             await coordinator.run(configuration: configuration, pauseController: pauseController!) { [weak self] update in
                 guard let self else { return }
                 await self.consume(update: update)
             }
         }
+    }
+
+    private func startBatchRun(sourceURL: URL, destinationURL: URL) {
+        let configuration = makeBatchConfiguration(sourceURL: sourceURL, destinationURL: destinationURL)
+        prepareForRun(sourceURL: sourceURL, destinationURL: destinationURL)
+        batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
+        batchSnapshot.batchID = configuration.batchID
+        batchProjects = []
+        jobTask = Task {
+            await batchCoordinator.run(configuration: configuration, pauseController: pauseController!) { [weak self] update in
+                guard let self else { return }
+                await self.consume(update: update)
+            }
+        }
+    }
+
+    private func makeBatchConfiguration(sourceURL: URL, destinationURL: URL) -> BatchConfiguration {
+        BatchConfiguration(
+            batchID: UUID(),
+            sourceRootURL: sourceURL,
+            destinationRootURL: destinationURL,
+            suffix: batchSuffix,
+            transferPolicy: transferPolicy,
+            priorityPolicy: priorityPolicy,
+            workerCount: max(2, min(workerCount, 6)),
+            hydrationWindow: max(4, min(hydrationWindow, 24)),
+            retryCount: max(1, retryCount),
+            backoffSchedule: [.seconds(0), .seconds(2), .seconds(5), .seconds(15)],
+            maxHydrationWait: .seconds(300),
+            enableFinderFallback: true
+        )
+    }
+
+    private func prepareForRun(sourceURL: URL, destinationURL: URL) {
+        logs.removeAll()
+        activities.removeAll()
+        failures.removeAll()
+        snapshot = .idle(source: sourceURL, destination: destinationURL)
+        batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
+        pauseController = PauseController()
+        isPaused = false
     }
 
     private func consume(update: JobUpdate) {
@@ -168,6 +277,10 @@ final class MainViewModel {
             self.failures = failures.sorted { $0.createdAt < $1.createdAt }
         case .activities(let activities):
             self.activities = activities
+        case .batchSnapshot(let snapshot):
+            self.batchSnapshot = snapshot
+        case .batchProjects(let projects):
+            self.batchProjects = projects
         }
     }
 
@@ -175,5 +288,10 @@ final class MainViewModel {
         snapshot = .idle(source: sourceURL, destination: destinationURL)
         snapshot.lastError = nil
         activities = []
+        batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
+        batchProjects = []
+        if runMode == .batchQueue {
+            rebuildBatchPreview()
+        }
     }
 }
