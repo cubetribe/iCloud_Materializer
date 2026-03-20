@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MainView: View {
     @State private var viewModel = MainViewModel()
+    @State private var now = Date()
 
     var body: some View {
         ScrollView {
@@ -12,6 +13,12 @@ struct MainView: View {
             .padding(20)
         }
         .frame(minWidth: 1280, minHeight: 920)
+        .task {
+            while !Task.isCancelled {
+                now = Date()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
         .onChange(of: viewModel.runMode, initial: true) { _, _ in
             viewModel.rebuildBatchPreview()
         }
@@ -43,6 +50,12 @@ struct MainView: View {
                         .font(.system(.footnote, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
+                }
+                if let runHealth = viewModel.runHealthState(now: now) {
+                    Text(runHealth.message)
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(runHealthColor(for: runHealth.level))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer()
@@ -533,6 +546,17 @@ struct MainView: View {
             Divider()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func runHealthColor(for level: RunHealthLevel) -> Color {
+        switch level {
+        case .active:
+            return .secondary
+        case .watch:
+            return .orange
+        case .stalled:
+            return .red
+        }
     }
 
     private func metricCard(_ title: String, value: String) -> some View {

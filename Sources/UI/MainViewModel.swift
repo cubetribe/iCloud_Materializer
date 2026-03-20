@@ -23,6 +23,7 @@ final class MainViewModel {
     var hydrationWindow: Int = 12
     var retryCount: Int = 3
     var isPaused = false
+    private(set) var lastProgressAt: Date?
 
     private let coordinator = MaterializerCoordinator()
     private let batchCoordinator = BatchCoordinator()
@@ -48,6 +49,10 @@ final class MainViewModel {
 
     var errorText: String? {
         batchSnapshot.lastError ?? snapshot.lastError
+    }
+
+    func runHealthState(now: Date) -> RunHealthState? {
+        RunHealthState.evaluate(isRunning: isRunning, lastProgressAt: lastProgressAt, now: now)
     }
 
     var transferPolicy: TransferPolicy {
@@ -264,24 +269,41 @@ final class MainViewModel {
         batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
         pauseController = PauseController()
         isPaused = false
+        lastProgressAt = Date()
     }
 
     private func consume(update: JobUpdate) {
         switch update {
         case .snapshot(let snapshot):
+            if snapshotHasProgress(from: self.snapshot, to: snapshot) {
+                lastProgressAt = Date()
+            }
             self.snapshot = snapshot
         case .log(let entry):
+            lastProgressAt = entry.createdAt
             logs.append(entry)
             if logs.count > maxLogEntries {
                 logs.removeFirst(logs.count - maxLogEntries)
             }
         case .failures(let failures):
+            if !failures.isEmpty {
+                lastProgressAt = failures.last?.createdAt ?? Date()
+            }
             self.failures = failures.sorted { $0.createdAt < $1.createdAt }
         case .activities(let activities):
+            if activities != self.activities {
+                lastProgressAt = Date()
+            }
             self.activities = activities
         case .batchSnapshot(let snapshot):
+            if batchSnapshotHasProgress(from: self.batchSnapshot, to: snapshot) {
+                lastProgressAt = Date()
+            }
             self.batchSnapshot = snapshot
         case .batchProjects(let projects):
+            if projects != self.batchProjects {
+                lastProgressAt = Date()
+            }
             self.batchProjects = projects
         }
     }
@@ -292,8 +314,36 @@ final class MainViewModel {
         activities = []
         batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
         batchProjects = []
+        lastProgressAt = nil
         if runMode == .batchQueue {
             rebuildBatchPreview()
         }
+    }
+
+    private func snapshotHasProgress(from old: JobSnapshot, to new: JobSnapshot) -> Bool {
+        old.phase != new.phase ||
+        old.phaseDetail != new.phaseDetail ||
+        old.currentPath != new.currentPath ||
+        old.totalDiscovered != new.totalDiscovered ||
+        old.totalDownloaded != new.totalDownloaded ||
+        old.totalCopied != new.totalCopied ||
+        old.totalFailed != new.totalFailed ||
+        old.processedChunks != new.processedChunks ||
+        old.activeWorkerCount != new.activeWorkerCount ||
+        old.finishedAt != new.finishedAt ||
+        old.lastError != new.lastError
+    }
+
+    private func batchSnapshotHasProgress(from old: BatchSnapshot, to new: BatchSnapshot) -> Bool {
+        old.state != new.state ||
+        old.completedProjects != new.completedProjects ||
+        old.warningProjects != new.warningProjects ||
+        old.failedProjects != new.failedProjects ||
+        old.conflictedProjects != new.conflictedProjects ||
+        old.readyForDeletionProjects != new.readyForDeletionProjects ||
+        old.currentProjectIndex != new.currentProjectIndex ||
+        old.currentProjectName != new.currentProjectName ||
+        old.finishedAt != new.finishedAt ||
+        old.lastError != new.lastError
     }
 }
