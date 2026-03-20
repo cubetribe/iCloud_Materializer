@@ -17,7 +17,14 @@ actor ZipEngine {
             sourceRoot: sourceRoot,
             configuration: configuration,
             pauseController: pauseController,
-            onProgress: onProgress
+            onEvent: { event in
+                switch event {
+                case .evaluating(let item):
+                    await onProgress(item.relativePath)
+                case .ready(let item, _):
+                    await onProgress(item.relativePath)
+                }
+            }
         )
 
         let temporaryZipURL = archiveRoot.appendingPathComponent("\(sourceRoot.lastPathComponent).zip", isDirectory: false)

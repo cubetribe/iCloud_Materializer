@@ -4,13 +4,20 @@ actor VerificationEngine {
     private let fileManager = FileManager.default
     private let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
 
-    func verify(expectedItems: [ScannedItem], at root: URL) throws -> VerificationResult {
+    func verify(
+        expectedItems: [ScannedItem],
+        at root: URL,
+        onProgress: (@Sendable (String) async -> Void)? = nil
+    ) async throws -> VerificationResult {
         let expectedMap = Dictionary(uniqueKeysWithValues: expectedItems.map { ($0.relativePath, $0) })
         let actualMap = try buildActualInventory(root: root)
         var mismatches: [String] = []
         var verifiedBytes: Int64 = 0
 
         for item in expectedItems {
+            if let onProgress {
+                await onProgress(item.relativePath)
+            }
             guard let actual = actualMap[item.relativePath] else {
                 mismatches.append("Missing item: \(item.relativePath)")
                 continue

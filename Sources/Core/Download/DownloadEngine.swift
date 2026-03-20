@@ -3,6 +3,11 @@ import Foundation
 actor DownloadEngine {
     private let fileManager = FileManager.default
 
+    enum Event: Sendable {
+        case evaluating(ScannedItem)
+        case ready(ScannedItem, downloaded: Bool)
+    }
+
     struct Report: Sendable {
         var items: [ScannedItem]
         var downloadedCount: Int
@@ -13,20 +18,21 @@ actor DownloadEngine {
         sourceRoot: URL,
         configuration: JobConfiguration,
         pauseController: PauseController,
-        onProgress: @escaping @Sendable (String) async -> Void
+        onEvent: @escaping @Sendable (Event) async -> Void
     ) async throws -> Report {
         var updatedItems: [ScannedItem] = []
         var downloadedCount = 0
 
         for item in items.sorted(by: { $0.relativePath < $1.relativePath }) {
             try await pauseController.checkpoint()
-            await onProgress(item.relativePath)
+            await onEvent(.evaluating(item))
             guard item.isUbiquitous, !item.isLocalReady else {
                 var readyItem = item
                 if readyItem.state == .pending {
                     readyItem.state = .localReady
                 }
                 updatedItems.append(readyItem)
+                await onEvent(.ready(readyItem, downloaded: false))
                 continue
             }
 
@@ -49,6 +55,7 @@ actor DownloadEngine {
 
             if let resolvedItem {
                 updatedItems.append(resolvedItem)
+                await onEvent(.ready(resolvedItem, downloaded: true))
             } else {
                 throw PipelineError.materializationFailed(item.relativePath)
             }

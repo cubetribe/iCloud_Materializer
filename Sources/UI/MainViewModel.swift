@@ -7,6 +7,7 @@ final class MainViewModel {
     var sourceURL: URL?
     var destinationURL: URL?
     var snapshot: JobSnapshot = .idle(source: nil, destination: nil)
+    var activities: [WorkerActivity] = []
     var logs: [LogEntry] = []
     var failures: [FailureRecord] = []
     var pendingConflict: PromotionConflictState?
@@ -16,6 +17,7 @@ final class MainViewModel {
     private let coordinator = MaterializerCoordinator()
     private var pauseController: PauseController?
     private var jobTask: Task<Void, Never>?
+    private let maxLogEntries = 400
 
     var isRunning: Bool {
         switch snapshot.phase {
@@ -118,6 +120,7 @@ final class MainViewModel {
             enableFinderFallback: true
         )
         logs.removeAll()
+        activities.removeAll()
         failures.removeAll()
         snapshot = .idle(source: sourceURL, destination: destinationURL)
         snapshot.jobID = configuration.jobID
@@ -137,13 +140,19 @@ final class MainViewModel {
             self.snapshot = snapshot
         case .log(let entry):
             logs.append(entry)
+            if logs.count > maxLogEntries {
+                logs.removeFirst(logs.count - maxLogEntries)
+            }
         case .failures(let failures):
             self.failures = failures.sorted { $0.createdAt < $1.createdAt }
+        case .activities(let activities):
+            self.activities = activities
         }
     }
 
     private func refreshIdleSnapshot() {
         snapshot = .idle(source: sourceURL, destination: destinationURL)
         snapshot.lastError = nil
+        activities = []
     }
 }

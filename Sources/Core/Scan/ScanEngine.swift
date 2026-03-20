@@ -12,7 +12,10 @@ actor ScanEngine {
         .isHiddenKey
     ]
 
-    func scan(sourceRoot: URL) throws -> [ScannedItem] {
+    func scan(
+        sourceRoot: URL,
+        onItem: (@Sendable (ScannedItem) async -> Void)? = nil
+    ) async throws -> [ScannedItem] {
         guard let enumerator = fileManager.enumerator(
             at: sourceRoot,
             includingPropertiesForKeys: Array(resourceKeys),
@@ -23,7 +26,7 @@ actor ScanEngine {
         }
 
         var items: [ScannedItem] = []
-        for case let url as URL in enumerator {
+        while let url = enumerator.nextObject() as? URL {
             let relativePath = normalizedRelativePath(for: url, sourceRoot: sourceRoot)
             guard !relativePath.isEmpty else { continue }
             let values = try url.resourceValues(forKeys: resourceKeys)
@@ -40,21 +43,23 @@ actor ScanEngine {
             } else {
                 symlinkDestination = nil
             }
-            items.append(
-                ScannedItem(
-                    id: UUID(),
-                    relativePath: relativePath,
-                    kind: kind,
-                    expectedSize: fileSize,
-                    isHidden: values.isHidden ?? url.lastPathComponent.hasPrefix("."),
-                    isUbiquitous: isUbiquitous,
-                    isLocalReady: isLocalReady,
-                    downloadStatusRaw: downloadStatus?.rawValue,
-                    symlinkDestination: symlinkDestination,
-                    state: isLocalReady ? .localReady : .pending,
-                    lastError: nil
-                )
+            let item = ScannedItem(
+                id: UUID(),
+                relativePath: relativePath,
+                kind: kind,
+                expectedSize: fileSize,
+                isHidden: values.isHidden ?? url.lastPathComponent.hasPrefix("."),
+                isUbiquitous: isUbiquitous,
+                isLocalReady: isLocalReady,
+                downloadStatusRaw: downloadStatus?.rawValue,
+                symlinkDestination: symlinkDestination,
+                state: isLocalReady ? .localReady : .pending,
+                lastError: nil
             )
+            items.append(item)
+            if let onItem {
+                await onItem(item)
+            }
         }
         return items.sorted { $0.relativePath < $1.relativePath }
     }

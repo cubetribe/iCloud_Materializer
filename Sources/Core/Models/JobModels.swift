@@ -68,6 +68,17 @@ enum LogLevel: String, Codable, Sendable, CaseIterable {
     case error
 }
 
+enum LiveActivityPhase: String, Codable, Sendable, CaseIterable {
+    case scanning
+    case planning
+    case materializing
+    case copying
+    case verifying
+    case promoting
+    case zipping
+    case idle
+}
+
 struct ScannedItem: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var relativePath: String
@@ -110,9 +121,19 @@ struct LogEntry: Identifiable, Codable, Hashable, Sendable {
     var path: String?
 }
 
+struct WorkerActivity: Identifiable, Hashable, Sendable {
+    var id: UUID
+    var label: String
+    var phase: LiveActivityPhase
+    var detail: String
+    var path: String?
+    var updatedAt: Date
+}
+
 struct JobSnapshot: Codable, Hashable, Sendable {
     var jobID: UUID
     var phase: JobPhase
+    var phaseDetail: String?
     var sourcePath: String
     var destinationPath: String
     var currentPath: String?
@@ -120,8 +141,15 @@ struct JobSnapshot: Codable, Hashable, Sendable {
     var totalDownloaded: Int
     var totalCopied: Int
     var totalFailed: Int
+    var plannedChunks: Int
+    var processedChunks: Int
     var estimatedRemainingCount: Int
     var throughputItemsPerSecond: Double
+    var throughputBytesPerSecond: Double
+    var totalExpectedBytes: Int64
+    var copiedBytes: Int64
+    var activeWorkerCount: Int
+    var estimatedRemainingSeconds: Double?
     var startedAt: Date?
     var finishedAt: Date?
     var lastError: String?
@@ -130,6 +158,7 @@ struct JobSnapshot: Codable, Hashable, Sendable {
         JobSnapshot(
             jobID: UUID(),
             phase: .idle,
+            phaseDetail: nil,
             sourcePath: source?.path ?? "",
             destinationPath: destination?.path ?? "",
             currentPath: nil,
@@ -137,8 +166,15 @@ struct JobSnapshot: Codable, Hashable, Sendable {
             totalDownloaded: 0,
             totalCopied: 0,
             totalFailed: 0,
+            plannedChunks: 0,
+            processedChunks: 0,
             estimatedRemainingCount: 0,
             throughputItemsPerSecond: 0,
+            throughputBytesPerSecond: 0,
+            totalExpectedBytes: 0,
+            copiedBytes: 0,
+            activeWorkerCount: 0,
+            estimatedRemainingSeconds: nil,
             startedAt: nil,
             finishedAt: nil,
             lastError: nil
@@ -183,6 +219,7 @@ enum JobUpdate: Sendable {
     case snapshot(JobSnapshot)
     case log(LogEntry)
     case failures([FailureRecord])
+    case activities([WorkerActivity])
 }
 
 struct PromotionConflictState: Identifiable, Sendable {

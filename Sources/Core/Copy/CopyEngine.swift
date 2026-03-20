@@ -3,12 +3,17 @@ import Foundation
 actor CopyEngine {
     private let fileManager = FileManager.default
 
+    enum Event: Sendable {
+        case preparing(ScannedItem)
+        case copied(ScannedItem)
+    }
+
     func copyChunk(
         items: [ScannedItem],
         sourceRoot: URL,
         stageRoot: URL,
         pauseController: PauseController,
-        onProgress: @escaping @Sendable (String) async -> Void
+        onEvent: @escaping @Sendable (Event) async -> Void
     ) async throws {
         if fileManager.fileExists(atPath: stageRoot.path) {
             try fileManager.removeItem(at: stageRoot)
@@ -18,7 +23,7 @@ actor CopyEngine {
         let sortedItems = items.sorted(by: itemSortOrder)
         for item in sortedItems {
             try await pauseController.checkpoint()
-            await onProgress(item.relativePath)
+            await onEvent(.preparing(item))
             let sourceURL = sourceRoot.appendingPathComponent(item.relativePath, isDirectory: item.kind == .directory)
             let destinationURL = stageRoot.appendingPathComponent(item.relativePath, isDirectory: item.kind == .directory)
             try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -43,6 +48,7 @@ actor CopyEngine {
                 }
                 try coordinatedCopy(from: sourceURL, to: destinationURL)
             }
+            await onEvent(.copied(item))
         }
     }
 

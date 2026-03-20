@@ -15,6 +15,7 @@
 		4780277E0E058420BF3A7D2A /* iCloudMaterializerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A37BC611365F3FFE1F9DCE4F /* iCloudMaterializerApp.swift */; };
 		4BC53877BC54E3BA0092BAC9 /* FinderRecoveryEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D9993D81946AB8D65DF3B62 /* FinderRecoveryEngine.swift */; };
 		599F2D5B3D342BA6CE9BE50D /* AppLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EAC89D9501B6BA29E255EC3 /* AppLogger.swift */; };
+		5C30C8A1C10A40A3BEFDFE2C /* ProgressTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6AB68996C675FB8F0983E0A /* ProgressTracker.swift */; };
 		635F6F103811B1E89C35B26E /* CopyEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47A51C1E42687846D60C1DEE /* CopyEngine.swift */; };
 		67025E06C3057466CC12814B /* PauseController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77D416F455BFE4454D932FDB /* PauseController.swift */; };
 		77BE0AD40CC45A760D3DD431 /* ScanEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83839E93A5012A4E00DE5240 /* ScanEngine.swift */; };
@@ -64,6 +65,7 @@
 		9369E7027AA5D022EC216AB2 /* PipelineError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PipelineError.swift; sourceTree = "<group>"; };
 		A166036201DFB64FCB466F7D /* FolderAccessManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderAccessManager.swift; sourceTree = "<group>"; };
 		A37BC611365F3FFE1F9DCE4F /* iCloudMaterializerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iCloudMaterializerApp.swift; sourceTree = "<group>"; };
+		D6AB68996C675FB8F0983E0A /* ProgressTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressTracker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -134,6 +136,7 @@
 				90D3563BCCDEF33C52AF39D9 /* MaterializerCoordinator.swift */,
 				77D416F455BFE4454D932FDB /* PauseController.swift */,
 				9369E7027AA5D022EC216AB2 /* PipelineError.swift */,
+				D6AB68996C675FB8F0983E0A /* ProgressTracker.swift */,
 			);
 			path = Pipeline;
 			sourceTree = "<group>";
@@ -320,6 +323,7 @@
 				D53EC15AA53F4D0619D63854 /* MaterializerCoordinator.swift in Sources */,
 				67025E06C3057466CC12814B /* PauseController.swift in Sources */,
 				0BACCE8251F9964F30EBE60A /* PipelineError.swift in Sources */,
+				5C30C8A1C10A40A3BEFDFE2C /* ProgressTracker.swift in Sources */,
 				FCD747E115FDBF10338DDF48 /* PromotionEngine.swift in Sources */,
 				77BE0AD40CC45A760D3DD431 /* ScanEngine.swift in Sources */,
 				E8B4FD3C47D2FA503E41AB38 /* VerificationEngine.swift in Sources */,

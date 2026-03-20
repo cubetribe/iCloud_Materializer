@@ -29,7 +29,11 @@ actor MaterializerCoordinator {
             }
         }
 
-        var snapshot = initialSnapshot(configuration: configuration)
+        let tracker = ProgressTracker(
+            snapshot: initialSnapshot(configuration: configuration),
+            store: store,
+            onUpdate: onUpdate
+        )
         var failures: [FailureRecord] = []
 
         do {
@@ -39,19 +43,39 @@ actor MaterializerCoordinator {
                 quarantineRoot: workingDirectories.quarantineRoot
             )
 
-            snapshot.phase = .scanning
-            try await publish(snapshot: snapshot, store: store, onUpdate: onUpdate)
-            await log(.info, "Scanning source tree", jobID: configuration.jobID, store: store, onUpdate: onUpdate, path: configuration.sourceURL.path)
-            let items = try await scanEngine.scan(sourceRoot: configuration.sourceURL)
-            snapshot.totalDiscovered = items.count
-            snapshot.estimatedRemainingCount = items.count
+            try await tracker.begin(
+                detail: "Scanning source tree",
+                path: configuration.sourceURL.path
+            )
+            await log(
+                .info,
+                "Scanning source tree",
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate,
+                path: configuration.sourceURL.path
+            )
+
+            let items = try await scanEngine.scan(sourceRoot: configuration.sourceURL) { item in
+                try? await tracker.scanned(item)
+            }
             try await store.saveItems(jobID: configuration.jobID, items: items)
 
-            snapshot.phase = .planningChunks
-            try await publish(snapshot: snapshot, store: store, onUpdate: onUpdate)
+            try await tracker.updateTopLevelPhase(
+                .planningChunks,
+                detail: "Planning chunks",
+                force: true
+            )
             let chunks = chunkPlanner.plan(items: items)
             try await store.saveChunks(jobID: configuration.jobID, chunks: chunks)
-            await log(.info, "Planned \(chunks.count) chunks", jobID: configuration.jobID, store: store, onUpdate: onUpdate)
+            try await tracker.planned(chunkCount: chunks.count)
+            await log(
+                .info,
+                "Planned \(chunks.count) chunks",
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate
+            )
 
             let itemMap = Dictionary(uniqueKeysWithValues: items.map { ($0.relativePath, $0) })
             let outcomes = try await processChunks(
@@ -60,38 +84,50 @@ actor MaterializerCoordinator {
                 configuration: configuration,
                 workingDirectories: workingDirectories,
                 pauseController: pauseController,
+                tracker: tracker,
                 store: store,
                 onUpdate: onUpdate
             )
             failures.append(contentsOf: outcomes.flatMap(\.failures))
-            snapshot.totalDownloaded = outcomes.reduce(0) { $0 + $1.downloadedCount }
-            snapshot.totalCopied = outcomes.reduce(0) { $0 + $1.copiedCount }
-            snapshot.totalFailed = failures.count
-            snapshot.estimatedRemainingCount = max(0, snapshot.totalDiscovered - snapshot.totalCopied - snapshot.totalFailed)
-            snapshot.throughputItemsPerSecond = throughput(from: snapshot)
-            try await publish(snapshot: snapshot, store: store, onUpdate: onUpdate)
+
             if !failures.isEmpty {
-                snapshot.phase = .failed
-                snapshot.finishedAt = Date()
-                snapshot.lastError = failures.first?.message
-                try await publish(snapshot: snapshot, store: store, onUpdate: onUpdate)
+                try await tracker.fail(message: failures.first?.message ?? "One or more chunks failed.")
                 await onUpdate(.failures(failures))
                 return
             }
 
-            snapshot.phase = .finalVerifying
-            try await publish(snapshot: snapshot, store: store, onUpdate: onUpdate)
-            _ = try await verificationEngine.verify(expectedItems: items, at: workingDirectories.assembledRoot)
+            try await tracker.updateTopLevelPhase(
+                .finalVerifying,
+                detail: "Verifying assembled target",
+                path: workingDirectories.assembledRoot.path,
+                force: true
+            )
+            _ = try await verificationEngine.verify(expectedItems: items, at: workingDirectories.assembledRoot) { path in
+                try? await tracker.updateTopLevelPhase(
+                    .finalVerifying,
+                    detail: "Verifying assembled target",
+                    path: path,
+                    force: false
+                )
+            }
 
-            snapshot.phase = .promoting
-            try await publish(snapshot: snapshot, store: store, onUpdate: onUpdate)
+            try await tracker.updateTopLevelPhase(
+                .promoting,
+                detail: "Promoting assembled tree into destination",
+                path: configuration.visibleTargetURL.path,
+                force: true
+            )
             try await promotionEngine.promoteFinal(
                 from: workingDirectories.assembledRoot,
                 to: configuration.visibleTargetURL
             )
 
-            snapshot.phase = .zipping
-            try await publish(snapshot: snapshot, store: store, onUpdate: onUpdate)
+            try await tracker.updateTopLevelPhase(
+                .zipping,
+                detail: "Creating source ZIP archive",
+                path: configuration.sourceURL.path,
+                force: true
+            )
             do {
                 let zipURL = try await zipEngine.archiveSource(
                     sourceRoot: configuration.sourceURL,
@@ -100,34 +136,44 @@ actor MaterializerCoordinator {
                     configuration: configuration,
                     downloadEngine: downloadEngine,
                     pauseController: pauseController,
-                    onProgress: { [weak self] path in
-                        await self?.log(.info, "Preparing ZIP input \(path)", jobID: configuration.jobID, store: store, onUpdate: onUpdate, path: path)
+                    onProgress: { path in
+                        try? await tracker.updateTopLevelPhase(
+                            .zipping,
+                            detail: "Preparing source data for ZIP",
+                            path: path,
+                            force: false
+                        )
                     }
                 )
-                await log(.info, "Created ZIP at \(zipURL.path)", jobID: configuration.jobID, store: store, onUpdate: onUpdate, path: zipURL.path)
-                snapshot.phase = .completed
+                await log(
+                    .info,
+                    "Created ZIP at \(zipURL.path)",
+                    jobID: configuration.jobID,
+                    store: store,
+                    onUpdate: onUpdate,
+                    path: zipURL.path
+                )
+                try await tracker.complete(phase: .completed)
             } catch {
-                snapshot.phase = .completedWithWarnings
-                snapshot.lastError = error.localizedDescription
-                await log(.warning, "ZIP phase finished with warning: \(error.localizedDescription)", jobID: configuration.jobID, store: store, onUpdate: onUpdate)
+                await log(
+                    .warning,
+                    "ZIP phase finished with warning: \(error.localizedDescription)",
+                    jobID: configuration.jobID,
+                    store: store,
+                    onUpdate: onUpdate
+                )
+                try await tracker.complete(phase: .completedWithWarnings, lastError: error.localizedDescription)
             }
 
-            snapshot.finishedAt = Date()
-            snapshot.estimatedRemainingCount = 0
-            snapshot.throughputItemsPerSecond = throughput(from: snapshot)
-            try await publish(snapshot: snapshot, store: store, onUpdate: onUpdate)
             if !failures.isEmpty {
                 await onUpdate(.failures(failures))
             }
         } catch is CancellationError {
-            snapshot.phase = .cancelled
-            snapshot.finishedAt = Date()
-            snapshot.lastError = "Job cancelled."
-            try? await publish(snapshot: snapshot, store: store, onUpdate: onUpdate)
+            try? await tracker.cancel(message: "Job cancelled.")
         } catch {
             let failure = FailureRecord(
                 id: UUID(),
-                relativePath: snapshot.currentPath ?? configuration.sourceURL.path,
+                relativePath: configuration.sourceURL.path,
                 reason: .copy,
                 message: error.localizedDescription,
                 recoveryMode: .direct,
@@ -135,11 +181,8 @@ actor MaterializerCoordinator {
             )
             failures.append(failure)
             try? await store.saveFailure(jobID: configuration.jobID, failure: failure)
-            snapshot.phase = .failed
-            snapshot.finishedAt = Date()
-            snapshot.totalFailed = failures.count
-            snapshot.lastError = error.localizedDescription
-            try? await publish(snapshot: snapshot, store: store, onUpdate: onUpdate)
+            try? await tracker.markFailure(failure)
+            try? await tracker.fail(message: error.localizedDescription)
             await onUpdate(.failures(failures))
         }
     }
@@ -150,6 +193,7 @@ actor MaterializerCoordinator {
         configuration: JobConfiguration,
         workingDirectories: WorkingDirectories,
         pauseController: PauseController,
+        tracker: ProgressTracker,
         store: JobStore,
         onUpdate: @escaping @Sendable (JobUpdate) async -> Void
     ) async throws -> [ChunkOutcome] {
@@ -169,6 +213,7 @@ actor MaterializerCoordinator {
                         configuration: configuration,
                         workingDirectories: workingDirectories,
                         pauseController: pauseController,
+                        tracker: tracker,
                         store: store,
                         onUpdate: onUpdate
                     )
@@ -185,6 +230,7 @@ actor MaterializerCoordinator {
                             configuration: configuration,
                             workingDirectories: workingDirectories,
                             pauseController: pauseController,
+                            tracker: tracker,
                             store: store,
                             onUpdate: onUpdate
                         )
@@ -202,35 +248,113 @@ actor MaterializerCoordinator {
         configuration: JobConfiguration,
         workingDirectories: WorkingDirectories,
         pauseController: PauseController,
+        tracker: ProgressTracker,
         store: JobStore,
         onUpdate: @escaping @Sendable (JobUpdate) async -> Void
     ) async throws -> ChunkOutcome {
         let items = chunk.relativePaths.compactMap { itemMap[$0] }
         let stageRoot = workingDirectories.stagingRoot.appendingPathComponent(chunk.id.uuidString, isDirectory: true)
-        await log(.info, "Processing chunk \(chunk.id.uuidString)", jobID: configuration.jobID, store: store, onUpdate: onUpdate, path: chunk.anchorRelativePath)
+        let workerLabel = chunkLabel(for: chunk)
+
+        await log(
+            .info,
+            "Processing \(workerLabel)",
+            jobID: configuration.jobID,
+            store: store,
+            onUpdate: onUpdate,
+            path: chunk.anchorRelativePath
+        )
+
+        let copyTally = ChunkCopyTally()
 
         do {
+            try await tracker.updateWorker(
+                id: chunk.id,
+                label: workerLabel,
+                phase: .materializing,
+                detail: "Materializing iCloud content",
+                path: chunk.anchorRelativePath ?? chunk.relativePaths.first
+            )
             let report = try await downloadEngine.materialize(
                 items: items,
                 sourceRoot: configuration.sourceURL,
                 configuration: configuration,
                 pauseController: pauseController,
-                onProgress: { [weak self] path in
-                    await self?.log(.info, "Materializing \(path)", jobID: configuration.jobID, store: store, onUpdate: onUpdate, path: path)
+                onEvent: { event in
+                    switch event {
+                    case .evaluating(let item):
+                        let detail = item.isUbiquitous && !item.isLocalReady ? "Downloading from iCloud" : "Checking local availability"
+                        try? await tracker.updateWorker(
+                            id: chunk.id,
+                            label: workerLabel,
+                            phase: .materializing,
+                            detail: detail,
+                            path: item.relativePath
+                        )
+                    case .ready(let item, let downloaded):
+                        try? await tracker.markDownloadReady(item: item, downloaded: downloaded)
+                    }
                 }
             )
             try await store.saveItems(jobID: configuration.jobID, items: report.items)
+
+            try await tracker.updateWorker(
+                id: chunk.id,
+                label: workerLabel,
+                phase: .copying,
+                detail: "Copying into staging",
+                path: chunk.anchorRelativePath ?? chunk.relativePaths.first
+            )
             try await copyEngine.copyChunk(
                 items: report.items,
                 sourceRoot: configuration.sourceURL,
                 stageRoot: stageRoot,
                 pauseController: pauseController,
-                onProgress: { [weak self] path in
-                    await self?.log(.info, "Copying \(path)", jobID: configuration.jobID, store: store, onUpdate: onUpdate, path: path)
+                onEvent: { event in
+                    switch event {
+                    case .preparing(let item):
+                        try? await tracker.updateWorker(
+                            id: chunk.id,
+                            label: workerLabel,
+                            phase: .copying,
+                            detail: "Copying into staging",
+                            path: item.relativePath
+                        )
+                    case .copied(let item):
+                        await copyTally.record(item)
+                        try? await tracker.markCopied(item: item)
+                    }
                 }
             )
-            _ = try await verificationEngine.verify(expectedItems: report.items, at: stageRoot)
+
+            try await tracker.updateWorker(
+                id: chunk.id,
+                label: workerLabel,
+                phase: .verifying,
+                detail: "Verifying staged chunk",
+                path: chunk.anchorRelativePath ?? chunk.relativePaths.first
+            )
+            _ = try await verificationEngine.verify(expectedItems: report.items, at: stageRoot) { path in
+                try? await tracker.updateWorker(
+                    id: chunk.id,
+                    label: workerLabel,
+                    phase: .verifying,
+                    detail: "Verifying staged chunk",
+                    path: path
+                )
+            }
+
+            try await tracker.updateWorker(
+                id: chunk.id,
+                label: workerLabel,
+                phase: .promoting,
+                detail: "Promoting verified chunk",
+                path: chunk.anchorRelativePath ?? chunk.relativePaths.first
+            )
             try await promotionEngine.promoteChunk(from: stageRoot, into: workingDirectories.assembledRoot)
+            try await tracker.markChunkFinished()
+            try await tracker.clearWorker(id: chunk.id)
+
             return ChunkOutcome(
                 chunkID: chunk.id,
                 copiedCount: report.items.count,
@@ -239,6 +363,11 @@ actor MaterializerCoordinator {
                 failures: []
             )
         } catch {
+            let stagedTally = await copyTally.snapshot()
+            if stagedTally.count > 0 || stagedTally.bytes > 0 {
+                try? await tracker.rollbackCopied(itemCount: stagedTally.count, bytes: stagedTally.bytes)
+            }
+
             guard configuration.enableFinderFallback else {
                 let failure = FailureRecord(
                     id: UUID(),
@@ -249,6 +378,8 @@ actor MaterializerCoordinator {
                     createdAt: Date()
                 )
                 try await store.saveFailure(jobID: configuration.jobID, failure: failure)
+                try? await tracker.markFailure(failure)
+                try? await tracker.clearWorker(id: chunk.id)
                 return ChunkOutcome(
                     chunkID: chunk.id,
                     copiedCount: 0,
@@ -258,15 +389,57 @@ actor MaterializerCoordinator {
                 )
             }
 
-            await log(.warning, "Direct path failed; switching chunk to Finder recovery", jobID: configuration.jobID, store: store, onUpdate: onUpdate, path: chunk.anchorRelativePath)
+            await log(
+                .warning,
+                "Direct copy failed; switching \(workerLabel) to Finder recovery",
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate,
+                path: chunk.anchorRelativePath
+            )
+
             do {
+                try await tracker.updateWorker(
+                    id: chunk.id,
+                    label: workerLabel,
+                    phase: .copying,
+                    detail: "Finder recovery copy",
+                    path: chunk.anchorRelativePath ?? chunk.relativePaths.first
+                )
                 try await finderRecoveryEngine.recoverChunk(
                     chunk: chunk,
                     sourceRoot: configuration.sourceURL,
                     stageRoot: stageRoot
                 )
-                _ = try await verificationEngine.verify(expectedItems: items, at: stageRoot)
+                try await tracker.updateWorker(
+                    id: chunk.id,
+                    label: workerLabel,
+                    phase: .verifying,
+                    detail: "Verifying Finder recovery result",
+                    path: chunk.anchorRelativePath ?? chunk.relativePaths.first
+                )
+                _ = try await verificationEngine.verify(expectedItems: items, at: stageRoot) { path in
+                    try? await tracker.updateWorker(
+                        id: chunk.id,
+                        label: workerLabel,
+                        phase: .verifying,
+                        detail: "Verifying Finder recovery result",
+                        path: path
+                    )
+                }
+                try await tracker.updateWorker(
+                    id: chunk.id,
+                    label: workerLabel,
+                    phase: .promoting,
+                    detail: "Promoting Finder recovery result",
+                    path: chunk.anchorRelativePath ?? chunk.relativePaths.first
+                )
                 try await promotionEngine.promoteChunk(from: stageRoot, into: workingDirectories.assembledRoot)
+                for item in items {
+                    try? await tracker.markCopied(item: item)
+                }
+                try await tracker.markChunkFinished()
+                try await tracker.clearWorker(id: chunk.id)
                 return ChunkOutcome(
                     chunkID: chunk.id,
                     copiedCount: items.count,
@@ -284,6 +457,8 @@ actor MaterializerCoordinator {
                     createdAt: Date()
                 )
                 try await store.saveFailure(jobID: configuration.jobID, failure: failure)
+                try? await tracker.markFailure(failure)
+                try? await tracker.clearWorker(id: chunk.id)
                 return ChunkOutcome(
                     chunkID: chunk.id,
                     copiedCount: 0,
@@ -299,6 +474,7 @@ actor MaterializerCoordinator {
         JobSnapshot(
             jobID: configuration.jobID,
             phase: .idle,
+            phaseDetail: nil,
             sourcePath: configuration.sourceURL.path,
             destinationPath: configuration.destinationURL.path,
             currentPath: nil,
@@ -306,24 +482,31 @@ actor MaterializerCoordinator {
             totalDownloaded: 0,
             totalCopied: 0,
             totalFailed: 0,
+            plannedChunks: 0,
+            processedChunks: 0,
             estimatedRemainingCount: 0,
             throughputItemsPerSecond: 0,
+            throughputBytesPerSecond: 0,
+            totalExpectedBytes: 0,
+            copiedBytes: 0,
+            activeWorkerCount: 0,
+            estimatedRemainingSeconds: nil,
             startedAt: Date(),
             finishedAt: nil,
             lastError: nil
         )
     }
 
-    private func throughput(from snapshot: JobSnapshot) -> Double {
-        guard let startedAt = snapshot.startedAt else { return 0 }
-        let elapsed = max(Date().timeIntervalSince(startedAt), 0.001)
-        return Double(snapshot.totalCopied) / elapsed
+    private func chunkLabel(for chunk: ChunkManifest) -> String {
+        if let anchor = chunk.anchorRelativePath, !anchor.isEmpty {
+            return anchor
+        }
+        if let first = chunk.relativePaths.first {
+            return first
+        }
+        return "chunk-\(chunk.id.uuidString.prefix(8))"
     }
 
-    private func publish(snapshot: JobSnapshot, store: JobStore, onUpdate: @escaping @Sendable (JobUpdate) async -> Void) async throws {
-        try await store.saveJobSnapshot(snapshot)
-        await onUpdate(.snapshot(snapshot))
-    }
     private func log(
         _ level: LogLevel,
         _ message: String,
@@ -344,8 +527,25 @@ actor MaterializerCoordinator {
     ) async {
         var failureSnapshot = snapshot
         failureSnapshot.phase = .failed
+        failureSnapshot.phaseDetail = "Failed before job startup"
         failureSnapshot.finishedAt = Date()
         failureSnapshot.lastError = error.localizedDescription
         await onUpdate(.snapshot(failureSnapshot))
+    }
+}
+
+private actor ChunkCopyTally {
+    private var count = 0
+    private var bytes: Int64 = 0
+
+    func record(_ item: ScannedItem) {
+        count += 1
+        if item.kind == .file {
+            bytes += item.expectedSize
+        }
+    }
+
+    func snapshot() -> (count: Int, bytes: Int64) {
+        (count, bytes)
     }
 }

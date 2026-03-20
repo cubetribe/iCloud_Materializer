@@ -18,6 +18,7 @@ actor JobStore {
         CREATE TABLE IF NOT EXISTS jobs (
             job_id TEXT PRIMARY KEY,
             phase TEXT NOT NULL,
+            phase_detail TEXT,
             source_path TEXT NOT NULL,
             destination_path TEXT NOT NULL,
             current_path TEXT,
@@ -25,13 +26,34 @@ actor JobStore {
             total_downloaded INTEGER NOT NULL,
             total_copied INTEGER NOT NULL,
             total_failed INTEGER NOT NULL,
+            planned_chunks INTEGER NOT NULL DEFAULT 0,
+            processed_chunks INTEGER NOT NULL DEFAULT 0,
             estimated_remaining INTEGER NOT NULL,
             throughput REAL NOT NULL,
+            throughput_bytes REAL NOT NULL DEFAULT 0,
+            total_expected_bytes INTEGER NOT NULL DEFAULT 0,
+            copied_bytes INTEGER NOT NULL DEFAULT 0,
+            active_worker_count INTEGER NOT NULL DEFAULT 0,
+            estimated_remaining_seconds REAL,
             started_at REAL,
             finished_at REAL,
             last_error TEXT
         );
         """, db: db)
+        try Self.ensureColumns(
+            in: "jobs",
+            definitions: [
+                "phase_detail": "TEXT",
+                "planned_chunks": "INTEGER NOT NULL DEFAULT 0",
+                "processed_chunks": "INTEGER NOT NULL DEFAULT 0",
+                "throughput_bytes": "REAL NOT NULL DEFAULT 0",
+                "total_expected_bytes": "INTEGER NOT NULL DEFAULT 0",
+                "copied_bytes": "INTEGER NOT NULL DEFAULT 0",
+                "active_worker_count": "INTEGER NOT NULL DEFAULT 0",
+                "estimated_remaining_seconds": "REAL"
+            ],
+            db: db
+        )
         try Self.execute("""
         CREATE TABLE IF NOT EXISTS items (
             job_id TEXT NOT NULL,
@@ -102,26 +124,34 @@ actor JobStore {
         }
         let sql = """
         INSERT OR REPLACE INTO jobs
-        (job_id, phase, source_path, destination_path, current_path, total_discovered, total_downloaded, total_copied, total_failed, estimated_remaining, throughput, started_at, finished_at, last_error)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        (job_id, phase, phase_detail, source_path, destination_path, current_path, total_discovered, total_downloaded, total_copied, total_failed, planned_chunks, processed_chunks, estimated_remaining, throughput, throughput_bytes, total_expected_bytes, copied_bytes, active_worker_count, estimated_remaining_seconds, started_at, finished_at, last_error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         let startedAt = snapshot.startedAt?.timeIntervalSince1970
         let finishedAt = snapshot.finishedAt?.timeIntervalSince1970
         try prepareAndStep(sql) { statement in
             bind(snapshot.jobID.uuidString, to: 1, in: statement)
             bind(snapshot.phase.rawValue, to: 2, in: statement)
-            bind(snapshot.sourcePath, to: 3, in: statement)
-            bind(snapshot.destinationPath, to: 4, in: statement)
-            bind(snapshot.currentPath, to: 5, in: statement)
-            sqlite3_bind_int64(statement, 6, sqlite3_int64(snapshot.totalDiscovered))
-            sqlite3_bind_int64(statement, 7, sqlite3_int64(snapshot.totalDownloaded))
-            sqlite3_bind_int64(statement, 8, sqlite3_int64(snapshot.totalCopied))
-            sqlite3_bind_int64(statement, 9, sqlite3_int64(snapshot.totalFailed))
-            sqlite3_bind_int64(statement, 10, sqlite3_int64(snapshot.estimatedRemainingCount))
-            sqlite3_bind_double(statement, 11, snapshot.throughputItemsPerSecond)
-            bind(startedAt, to: 12, in: statement)
-            bind(finishedAt, to: 13, in: statement)
-            bind(snapshot.lastError, to: 14, in: statement)
+            bind(snapshot.phaseDetail, to: 3, in: statement)
+            bind(snapshot.sourcePath, to: 4, in: statement)
+            bind(snapshot.destinationPath, to: 5, in: statement)
+            bind(snapshot.currentPath, to: 6, in: statement)
+            sqlite3_bind_int64(statement, 7, sqlite3_int64(snapshot.totalDiscovered))
+            sqlite3_bind_int64(statement, 8, sqlite3_int64(snapshot.totalDownloaded))
+            sqlite3_bind_int64(statement, 9, sqlite3_int64(snapshot.totalCopied))
+            sqlite3_bind_int64(statement, 10, sqlite3_int64(snapshot.totalFailed))
+            sqlite3_bind_int64(statement, 11, sqlite3_int64(snapshot.plannedChunks))
+            sqlite3_bind_int64(statement, 12, sqlite3_int64(snapshot.processedChunks))
+            sqlite3_bind_int64(statement, 13, sqlite3_int64(snapshot.estimatedRemainingCount))
+            sqlite3_bind_double(statement, 14, snapshot.throughputItemsPerSecond)
+            sqlite3_bind_double(statement, 15, snapshot.throughputBytesPerSecond)
+            sqlite3_bind_int64(statement, 16, sqlite3_int64(snapshot.totalExpectedBytes))
+            sqlite3_bind_int64(statement, 17, sqlite3_int64(snapshot.copiedBytes))
+            sqlite3_bind_int64(statement, 18, sqlite3_int64(snapshot.activeWorkerCount))
+            bind(snapshot.estimatedRemainingSeconds, to: 19, in: statement)
+            bind(startedAt, to: 20, in: statement)
+            bind(finishedAt, to: 21, in: statement)
+            bind(snapshot.lastError, to: 22, in: statement)
         }
     }
 
@@ -225,7 +255,7 @@ actor JobStore {
             throw PipelineError.persistenceFailed("Database connection is closed.")
         }
         let sql = """
-        SELECT phase, source_path, destination_path, current_path, total_discovered, total_downloaded, total_copied, total_failed, estimated_remaining, throughput, started_at, finished_at, last_error
+        SELECT phase, phase_detail, source_path, destination_path, current_path, total_discovered, total_downloaded, total_copied, total_failed, planned_chunks, processed_chunks, estimated_remaining, throughput, throughput_bytes, total_expected_bytes, copied_bytes, active_worker_count, estimated_remaining_seconds, started_at, finished_at, last_error
         FROM jobs WHERE job_id = ? LIMIT 1;
         """
         var statement: OpaquePointer?
@@ -241,18 +271,26 @@ actor JobStore {
         return JobSnapshot(
             jobID: jobID,
             phase: phase,
-            sourcePath: string(at: 1, in: statement) ?? "",
-            destinationPath: string(at: 2, in: statement) ?? "",
-            currentPath: string(at: 3, in: statement),
-            totalDiscovered: Int(sqlite3_column_int64(statement, 4)),
-            totalDownloaded: Int(sqlite3_column_int64(statement, 5)),
-            totalCopied: Int(sqlite3_column_int64(statement, 6)),
-            totalFailed: Int(sqlite3_column_int64(statement, 7)),
-            estimatedRemainingCount: Int(sqlite3_column_int64(statement, 8)),
-            throughputItemsPerSecond: sqlite3_column_double(statement, 9),
-            startedAt: date(at: 10, in: statement),
-            finishedAt: date(at: 11, in: statement),
-            lastError: string(at: 12, in: statement)
+            phaseDetail: string(at: 1, in: statement),
+            sourcePath: string(at: 2, in: statement) ?? "",
+            destinationPath: string(at: 3, in: statement) ?? "",
+            currentPath: string(at: 4, in: statement),
+            totalDiscovered: Int(sqlite3_column_int64(statement, 5)),
+            totalDownloaded: Int(sqlite3_column_int64(statement, 6)),
+            totalCopied: Int(sqlite3_column_int64(statement, 7)),
+            totalFailed: Int(sqlite3_column_int64(statement, 8)),
+            plannedChunks: Int(sqlite3_column_int64(statement, 9)),
+            processedChunks: Int(sqlite3_column_int64(statement, 10)),
+            estimatedRemainingCount: Int(sqlite3_column_int64(statement, 11)),
+            throughputItemsPerSecond: sqlite3_column_double(statement, 12),
+            throughputBytesPerSecond: sqlite3_column_double(statement, 13),
+            totalExpectedBytes: sqlite3_column_int64(statement, 14),
+            copiedBytes: sqlite3_column_int64(statement, 15),
+            activeWorkerCount: Int(sqlite3_column_int64(statement, 16)),
+            estimatedRemainingSeconds: double(at: 17, in: statement),
+            startedAt: date(at: 18, in: statement),
+            finishedAt: date(at: 19, in: statement),
+            lastError: string(at: 20, in: statement)
         )
     }
 
@@ -260,6 +298,34 @@ actor JobStore {
         guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
             throw PipelineError.persistenceFailed(lastErrorMessage(db: db))
         }
+    }
+
+    private static func ensureColumns(
+        in tableName: String,
+        definitions: [String: String],
+        db: OpaquePointer?
+    ) throws {
+        let existingColumns = try tableColumns(for: tableName, db: db)
+        for (columnName, definition) in definitions where !existingColumns.contains(columnName) {
+            try execute("ALTER TABLE \(tableName) ADD COLUMN \(columnName) \(definition);", db: db)
+        }
+    }
+
+    private static func tableColumns(for tableName: String, db: OpaquePointer?) throws -> Set<String> {
+        let sql = "PRAGMA table_info(\(tableName));"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw PipelineError.persistenceFailed(lastErrorMessage(db: db))
+        }
+        defer { sqlite3_finalize(statement) }
+
+        var columns: Set<String> = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let name = sqlite3_column_text(statement, 1) {
+                columns.insert(String(cString: name))
+            }
+        }
+        return columns
     }
 
     private func prepareAndStep(_ sql: String, binder: (OpaquePointer?) throws -> Void) throws {
@@ -302,6 +368,11 @@ actor JobStore {
     private func date(at index: Int32, in statement: OpaquePointer?) -> Date? {
         guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
         return Date(timeIntervalSince1970: sqlite3_column_double(statement, index))
+    }
+
+    private func double(at index: Int32, in statement: OpaquePointer?) -> Double? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
+        return sqlite3_column_double(statement, index)
     }
 
     private static let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
