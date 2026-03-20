@@ -220,6 +220,39 @@ final class BatchCoordinatorTests: XCTestCase {
         XCTAssertTrue(plans.compactMap { $0.deletionManifestURL }.allSatisfy { fileManager.fileExists(atPath: $0.path) })
     }
 
+    func testRunPrefetchesUpcomingProjectRoots() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("BatchSource", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("BatchDestination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try createFixture(named: "Alpha", in: sourceRoot)
+        try createFixture(named: "Beta", in: sourceRoot)
+        try createFixture(named: "Gamma", in: sourceRoot)
+
+        let prefetchRecorder = BatchPrefetchRecorder()
+        let recorder = BatchUpdateRecorder()
+        let coordinator = BatchCoordinator(projectPrefetcher: { url in
+            await prefetchRecorder.record(url)
+        })
+        var configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
+        configuration.projectPrefetchWindow = 2
+
+        await coordinator.run(
+            configuration: configuration,
+            pauseController: PauseController()
+        ) { update in
+            await recorder.record(update)
+        }
+
+        let prefetchedNames = Set(await prefetchRecorder.paths().map { $0.lastPathComponent })
+
+        XCTAssertEqual(prefetchedNames, Set(["Beta", "Gamma"]))
+    }
+
     private func makeConfiguration(sourceRoot: URL, destinationRoot: URL) -> BatchConfiguration {
         BatchConfiguration(
             batchID: UUID(),
@@ -253,6 +286,18 @@ final class BatchCoordinatorTests: XCTestCase {
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(persisted)
         try data.write(to: url, options: .atomic)
+    }
+}
+
+private actor BatchPrefetchRecorder {
+    private var recorded: [URL] = []
+
+    func record(_ url: URL) {
+        recorded.append(url)
+    }
+
+    func paths() -> [URL] {
+        recorded
     }
 }
 

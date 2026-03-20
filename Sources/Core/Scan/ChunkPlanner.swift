@@ -4,6 +4,7 @@ struct ChunkPlanner {
     var maxFileBatchSize: Int = 500
     var maxItemsPerChunk: Int = 5_000
     var maxExpectedBytesPerChunk: Int64 = 2 * 1024 * 1024 * 1024
+    var maxPendingHydrationsPerChunk: Int = 256
 
     func plan(items: [ScannedItem], priorityPolicy: TransferPriorityPolicy = .naturalOrder) -> [ChunkManifest] {
         let rootFiles = items.filter { $0.pathComponents.count == 1 && $0.kind != .directory }
@@ -31,14 +32,13 @@ struct ChunkPlanner {
         items: [ScannedItem],
         priorityPolicy: TransferPriorityPolicy
     ) -> [ChunkManifest] {
-        let expectedBytes = items.expectedBytes
-        if items.count <= maxItemsPerChunk && expectedBytes <= maxExpectedBytesPerChunk {
+        if shouldKeepAsSingleChunk(items) {
             return [ChunkManifest(
                 id: UUID(),
                 anchorRelativePath: anchorRelativePath,
                 kind: .directorySubtree,
                 relativePaths: items.map(\.relativePath).sorted(),
-                expectedBytes: expectedBytes,
+                expectedBytes: items.expectedBytes,
                 state: .pending,
                 recoveryMode: .direct,
                 lastError: nil
@@ -77,6 +77,19 @@ struct ChunkPlanner {
             ))
         }
         return chunks
+    }
+
+    private func shouldKeepAsSingleChunk(_ items: [ScannedItem]) -> Bool {
+        let expectedBytes = items.expectedBytes
+        let pendingHydrations = items.reduce(into: 0) { partial, item in
+            if item.kind != .directory && item.isUbiquitous && !item.isLocalReady {
+                partial += 1
+            }
+        }
+
+        return items.count <= maxItemsPerChunk &&
+            expectedBytes <= maxExpectedBytesPerChunk &&
+            pendingHydrations <= maxPendingHydrationsPerChunk
     }
 
     private func makeFileBatch(anchorRelativePath: String?, items: [ScannedItem]) -> ChunkManifest {

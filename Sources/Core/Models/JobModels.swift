@@ -360,6 +360,7 @@ struct BatchConfiguration: Sendable {
     var backoffSchedule: [Duration]
     var maxHydrationWait: Duration
     var enableFinderFallback: Bool
+    var projectPrefetchWindow: Int = 2
 
     var archiveRootURL: URL {
         sourceRootURL.appendingPathComponent("_Materializer_Archives", isDirectory: true)

@@ -44,18 +44,46 @@ final class ChunkPlannerTests: XCTestCase {
         XCTAssertTrue(chunks.allSatisfy { $0.relativePaths.count <= 5 })
     }
 
-    private func file(_ path: String, size: Int64) -> ScannedItem {
+    func testPlannerSplitsHydrationHeavyDirectoryBeforeItBecomesOneSlowChunk() {
+        let planner = ChunkPlanner(
+            maxFileBatchSize: 2,
+            maxItemsPerChunk: 100,
+            maxExpectedBytesPerChunk: 10_000,
+            maxPendingHydrationsPerChunk: 2
+        )
+        var items: [ScannedItem] = [directory("workspace")]
+        items += (0..<4).map { index in
+            file(
+                "workspace/file-\(index).txt",
+                size: 1,
+                isUbiquitous: true,
+                isLocalReady: false
+            )
+        }
+
+        let chunks = planner.plan(items: items)
+
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertTrue(chunks.allSatisfy { $0.relativePaths.count <= 2 })
+    }
+
+    private func file(
+        _ path: String,
+        size: Int64,
+        isUbiquitous: Bool = false,
+        isLocalReady: Bool = true
+    ) -> ScannedItem {
         ScannedItem(
             id: UUID(),
             relativePath: path,
             kind: .file,
             expectedSize: size,
             isHidden: false,
-            isUbiquitous: false,
-            isLocalReady: true,
+            isUbiquitous: isUbiquitous,
+            isLocalReady: isLocalReady,
             downloadStatusRaw: nil,
             symlinkDestination: nil,
-            state: .pending,
+            state: isLocalReady ? .localReady : .pending,
             lastError: nil
         )
     }

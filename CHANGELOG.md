@@ -25,6 +25,7 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Final completion now depends on verifying the visible promoted target, not only the internal assembled tree.
 - Batch ZIP archives are written to `<source root>/_Materializer_Archives/` instead of being mixed into each source project directory.
 - The UI now exposes stalled-run health signals to make long iCloud operations easier to monitor.
+- Batch runs now prewarm the next project roots and split hydration-heavy directories earlier, so large iCloud trees can use the worker pool more effectively.
 - README expanded into an operational guide covering run modes, safety model, runtime artifacts, resume behavior, and repo relocation.
 
 ### Fixed

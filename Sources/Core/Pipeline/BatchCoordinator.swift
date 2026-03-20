@@ -3,13 +3,23 @@ import Foundation
 final class BatchCoordinator: @unchecked Sendable {
     private let fileManager: FileManager
     private let coordinatorFactory: @Sendable () -> MaterializerCoordinator
+    private let projectPrefetcher: @Sendable (URL) async -> Void
 
     init(
         fileManager: FileManager = .default,
-        coordinatorFactory: @escaping @Sendable () -> MaterializerCoordinator = { MaterializerCoordinator() }
+        coordinatorFactory: @escaping @Sendable () -> MaterializerCoordinator = { MaterializerCoordinator() },
+        projectPrefetcher: @escaping @Sendable (URL) async -> Void = { url in
+            let resourceKeys: Set<URLResourceKey> = [.isUbiquitousItemKey]
+            guard let values = try? url.resourceValues(forKeys: resourceKeys),
+                  values.isUbiquitousItem == true else {
+                return
+            }
+            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
+        }
     ) {
         self.fileManager = fileManager
         self.coordinatorFactory = coordinatorFactory
+        self.projectPrefetcher = projectPrefetcher
     }
 
     func preview(configuration: BatchConfiguration) throws -> (snapshot: BatchSnapshot, projects: [BatchProjectPlan]) {
@@ -67,6 +77,7 @@ final class BatchCoordinator: @unchecked Sendable {
                 projects[index].startedAt = Date()
                 projects[index].finishedAt = nil
                 projects[index].detail = retryDetail(for: projects[index])
+                await prefetchUpcomingProjects(from: index, projects: &projects, configuration: configuration)
 
                 let runningSnapshot = snapshot(
                     for: projects,
@@ -294,6 +305,37 @@ final class BatchCoordinator: @unchecked Sendable {
             return "Retrying project after previous warnings"
         default:
             return "Running"
+        }
+    }
+
+    private func prefetchUpcomingProjects(
+        from currentIndex: Int,
+        projects: inout [BatchProjectPlan],
+        configuration: BatchConfiguration
+    ) async {
+        guard configuration.projectPrefetchWindow > 0 else { return }
+
+        var remaining = configuration.projectPrefetchWindow
+        for nextIndex in projects.indices where nextIndex > currentIndex {
+            guard remaining > 0 else { break }
+            guard shouldPrefetch(projects[nextIndex]) else { continue }
+            await projectPrefetcher(projects[nextIndex].sourceURL)
+            let hint = "Project root prefetch requested."
+            if projects[nextIndex].detail?.contains(hint) != true {
+                projects[nextIndex].detail = [projects[nextIndex].detail, hint]
+                    .compactMap { $0 }
+                    .joined(separator: "\n")
+            }
+            remaining -= 1
+        }
+    }
+
+    private func shouldPrefetch(_ project: BatchProjectPlan) -> Bool {
+        switch project.state {
+        case .pending, .failed, .cancelled, .completedWithWarnings:
+            return project.detail?.contains("Project root prefetch requested.") != true
+        case .running, .completed, .conflicted:
+            return false
         }
     }
 

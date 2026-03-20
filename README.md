@@ -32,7 +32,7 @@ For a single project run, the app executes this pipeline:
 
 1. scan the full source tree, including hidden files and dotfiles
 2. detect iCloud ubiquitous items and hydrate placeholders as needed
-3. plan chunked work units
+3. plan chunked work units, including earlier splitting of hydration-heavy directories so multiple workers can stay busy
 4. copy each chunk into an internal staging area
 5. verify staged and assembled output by path count and file sizes
 6. promote the assembled tree into the visible destination
@@ -78,6 +78,7 @@ Behavior:
 - each direct child folder becomes its own isolated project run
 - `_Materializer_Archives` and `.icloud-materializer` are ignored as source children
 - each project produces its own local copy, ZIP, and optional deletion manifest
+- the next few project roots are prewarmed in the background to reduce hydration idle time between batch items
 - completed batch projects can be resumed or skipped on later reruns when their expected outputs still exist
 
 Batch runtime artifacts:
@@ -202,7 +203,8 @@ The generated Xcode project should be treated as derived from [project.yml](proj
 - source deletion is still a manual follow-up step; the app only prepares deletion manifests
 - there is no dedicated deletion review or execute workflow yet
 - Finder fallback can still be fragile on very large or changing trees because it depends on macOS Automation and Finder stability
-- throughput depends heavily on iCloud/File Provider behavior; larger hydration windows may help, but pushing them too far can destabilize long runs
+- throughput depends heavily on iCloud/File Provider behavior; larger hydration windows and project-root prewarming help, but pushing concurrency too far can still destabilize long runs
+- batch copy is still promoted one project at a time; the speed-up comes from earlier hydration and better worker saturation, not from unsafe final-target merging
 - the current batch resume model is queue-oriented; it does not yet expose a dedicated UI for repairing a partially successful single project at sub-phase granularity
 - no CI pipeline is configured yet, so validation is currently local via `xcodebuild`
 
