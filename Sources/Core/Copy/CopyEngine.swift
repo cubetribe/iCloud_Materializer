@@ -1,8 +1,6 @@
 import Foundation
 
-actor CopyEngine {
-    private let fileManager = FileManager.default
-
+struct CopyEngine: Sendable {
     enum Event: Sendable {
         case preparing(ScannedItem)
         case copied(ScannedItem)
@@ -16,6 +14,7 @@ actor CopyEngine {
         pauseController: PauseController,
         onEvent: @escaping @Sendable (Event) async -> Void
     ) async throws {
+        let fileManager = FileManager.default
         if fileManager.fileExists(atPath: stageRoot.path) {
             try fileManager.removeItem(at: stageRoot)
         }
@@ -47,13 +46,13 @@ actor CopyEngine {
                 if fileManager.fileExists(atPath: destinationURL.path) {
                     try fileManager.removeItem(at: destinationURL)
                 }
-                try coordinatedCopy(from: sourceURL, to: destinationURL)
+                try coordinatedCopy(from: sourceURL, to: destinationURL, fileManager: fileManager)
             }
             await onEvent(.copied(item))
         }
     }
 
-    private func coordinatedCopy(from sourceURL: URL, to destinationURL: URL) throws {
+    private func coordinatedCopy(from sourceURL: URL, to destinationURL: URL, fileManager: FileManager) throws {
         var coordinationError: NSError?
         var operationError: Error?
         let coordinator = NSFileCoordinator(filePresenter: nil)

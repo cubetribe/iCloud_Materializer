@@ -1,6 +1,6 @@
 import Foundation
 
-actor MaterializerCoordinator {
+final class MaterializerCoordinator: @unchecked Sendable {
     private let scanEngine = ScanEngine()
     private let chunkPlanner = ChunkPlanner()
     private let downloadEngine = DownloadEngine()
@@ -10,6 +10,13 @@ actor MaterializerCoordinator {
     private let finderRecoveryEngine = FinderRecoveryEngine()
     private let zipEngine = ZipEngine()
     private let logger = AppLogger()
+    private let postPromotionHook: (@Sendable (URL) async throws -> Void)?
+
+    init(
+        postPromotionHook: (@Sendable (URL) async throws -> Void)? = nil
+    ) {
+        self.postPromotionHook = postPromotionHook
+    }
 
     func run(
         configuration: JobConfiguration,
@@ -37,6 +44,7 @@ actor MaterializerCoordinator {
         var failures: [FailureRecord] = []
 
         do {
+            try validateDestinationLayout(configuration: configuration)
             let workingDirectories = try await promotionEngine.prepare(configuration: configuration)
             try await promotionEngine.quarantineExistingVisibleTargetIfNeeded(
                 configuration: configuration,
@@ -63,7 +71,7 @@ actor MaterializerCoordinator {
             )
             await log(
                 .info,
-                "Hydration window: \(configuration.hydrationWindow) active iCloud items per worker",
+                "Hydration window: \(configuration.hydrationWindow) active iCloud items per worker, up to \(configuration.hydrationWindow * configuration.workerCount) in flight overall",
                 jobID: configuration.jobID,
                 store: store,
                 onUpdate: onUpdate
@@ -138,20 +146,20 @@ actor MaterializerCoordinator {
                 return
             }
 
-            try await tracker.updateTopLevelPhase(
-                .finalVerifying,
+            let assembledVerification = try await verifyTree(
+                expectedItems: items,
+                at: workingDirectories.assembledRoot,
                 detail: "Verifying assembled target",
-                path: workingDirectories.assembledRoot.path,
-                force: true
+                tracker: tracker
             )
-            _ = try await verificationEngine.verify(expectedItems: items, at: workingDirectories.assembledRoot) { path in
-                try? await tracker.updateTopLevelPhase(
-                    .finalVerifying,
-                    detail: "Verifying assembled target",
-                    path: path,
-                    force: false
-                )
-            }
+            await log(
+                .info,
+                "Verified assembled target: \(assembledVerification.verifiedCount) items, \(assembledVerification.verifiedBytes) bytes",
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate,
+                path: workingDirectories.assembledRoot.path
+            )
 
             try await tracker.updateTopLevelPhase(
                 .promoting,
@@ -162,6 +170,24 @@ actor MaterializerCoordinator {
             try await promotionEngine.promoteFinal(
                 from: workingDirectories.assembledRoot,
                 to: configuration.visibleTargetURL
+            )
+            if let postPromotionHook {
+                try await postPromotionHook(configuration.visibleTargetURL)
+            }
+
+            let visibleTargetVerification = try await verifyTree(
+                expectedItems: items,
+                at: configuration.visibleTargetURL,
+                detail: "Verifying visible target",
+                tracker: tracker
+            )
+            await log(
+                .info,
+                "Verified visible target: \(visibleTargetVerification.verifiedCount) items, \(visibleTargetVerification.verifiedBytes) bytes",
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate,
+                path: configuration.visibleTargetURL.path
             )
 
             try await tracker.updateTopLevelPhase(
@@ -548,6 +574,44 @@ actor MaterializerCoordinator {
             return first
         }
         return "chunk-\(chunk.id.uuidString.prefix(8))"
+    }
+
+    private func validateDestinationLayout(configuration: JobConfiguration) throws {
+        let sourcePath = configuration.sourceURL.standardizedFileURL.path
+        let destinationPath = configuration.destinationURL.standardizedFileURL.path
+        let visibleTargetPath = configuration.visibleTargetURL.standardizedFileURL.path
+
+        if sourcePath == destinationPath {
+            throw PipelineError.invalidDestination("Destination folder must not be the same as the source folder.")
+        }
+        if visibleTargetPath == sourcePath {
+            throw PipelineError.invalidDestination("Destination folder would place the copied project on top of the source folder.")
+        }
+        if destinationPath.hasPrefix(sourcePath + "/") {
+            throw PipelineError.invalidDestination("Destination folder must not be inside the source folder.")
+        }
+    }
+
+    private func verifyTree(
+        expectedItems: [ScannedItem],
+        at root: URL,
+        detail: String,
+        tracker: ProgressTracker
+    ) async throws -> VerificationResult {
+        try await tracker.updateTopLevelPhase(
+            .finalVerifying,
+            detail: detail,
+            path: root.path,
+            force: true
+        )
+        return try await verificationEngine.verify(expectedItems: expectedItems, at: root) { path in
+            try? await tracker.updateTopLevelPhase(
+                .finalVerifying,
+                detail: detail,
+                path: path,
+                force: false
+            )
+        }
     }
 
     private func log(

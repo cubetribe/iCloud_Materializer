@@ -2,6 +2,7 @@ import Foundation
 
 enum PipelineError: LocalizedError, Sendable {
     case missingFolderSelection
+    case invalidDestination(String)
     case promotionConflict(URL)
     case materializationFailed(String)
     case verificationFailed([String])
@@ -14,6 +15,8 @@ enum PipelineError: LocalizedError, Sendable {
         switch self {
         case .missingFolderSelection:
             return "Source and destination folders must be selected."
+        case .invalidDestination(let message):
+            return message
         case .promotionConflict(let url):
             return "The destination target already exists: \(url.path)"
         case .materializationFailed(let path):

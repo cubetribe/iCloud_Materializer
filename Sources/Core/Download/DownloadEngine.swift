@@ -1,8 +1,6 @@
 import Foundation
 
-actor DownloadEngine {
-    private let fileManager = FileManager.default
-
+struct DownloadEngine: Sendable {
     enum Event: Sendable {
         case evaluating(ScannedItem)
         case ready(ScannedItem, downloaded: Bool)
@@ -20,6 +18,7 @@ actor DownloadEngine {
         pauseController: PauseController,
         onEvent: @escaping @Sendable (Event) async -> Void
     ) async throws -> Report {
+        let fileManager = FileManager.default
         let sortedItems = configuration.priorityPolicy.sort(items: items)
         var resolvedItems: [String: ScannedItem] = [:]
         var downloadedCount = 0
@@ -123,14 +122,19 @@ actor DownloadEngine {
         return Report(items: updatedItems, downloadedCount: downloadedCount)
     }
 
-    private func pollDelay(forAttempt attempt: Int, schedule: [Duration]) -> Duration {
+    func pollDelay(forAttempt attempt: Int, schedule: [Duration]) -> Duration {
         guard !schedule.isEmpty else {
-            return .seconds(2)
+            return .seconds(1)
         }
+        let unclampedDelay: Duration
         if attempt < schedule.count {
-            return schedule[attempt]
+            unclampedDelay = schedule[attempt]
+        } else {
+            unclampedDelay = schedule.last ?? .seconds(1)
         }
-        return schedule.last ?? .seconds(2)
+
+        let seconds = min(max(unclampedDelay.timeInterval, 0.25), 2.0)
+        return .seconds(seconds)
     }
 }
 

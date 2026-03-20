@@ -1,7 +1,6 @@
 import Foundation
 
-actor VerificationEngine {
-    private let fileManager = FileManager.default
+struct VerificationEngine: Sendable {
     private let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
 
     func verify(
@@ -9,8 +8,9 @@ actor VerificationEngine {
         at root: URL,
         onProgress: (@Sendable (String) async -> Void)? = nil
     ) async throws -> VerificationResult {
+        let fileManager = FileManager.default
         let expectedMap = Dictionary(uniqueKeysWithValues: expectedItems.map { ($0.relativePath, $0) })
-        let actualMap = try buildActualInventory(root: root)
+        let actualMap = try buildActualInventory(root: root, fileManager: fileManager)
         var mismatches: [String] = []
         var verifiedBytes: Int64 = 0
 
@@ -54,7 +54,7 @@ actor VerificationEngine {
         return VerificationResult(verifiedCount: expectedItems.count, verifiedBytes: verifiedBytes)
     }
 
-    private func buildActualInventory(root: URL) throws -> [String: ScannedItem] {
+    private func buildActualInventory(root: URL, fileManager: FileManager) throws -> [String: ScannedItem] {
         guard let enumerator = fileManager.enumerator(
             at: root,
             includingPropertiesForKeys: Array(resourceKeys),
