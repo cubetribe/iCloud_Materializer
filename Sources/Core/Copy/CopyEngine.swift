@@ -1,0 +1,87 @@
+import Foundation
+
+actor CopyEngine {
+    private let fileManager = FileManager.default
+
+    func copyChunk(
+        items: [ScannedItem],
+        sourceRoot: URL,
+        stageRoot: URL,
+        pauseController: PauseController,
+        onProgress: @escaping @Sendable (String) async -> Void
+    ) async throws {
+        if fileManager.fileExists(atPath: stageRoot.path) {
+            try fileManager.removeItem(at: stageRoot)
+        }
+        try fileManager.createDirectory(at: stageRoot, withIntermediateDirectories: true)
+
+        let sortedItems = items.sorted(by: itemSortOrder)
+        for item in sortedItems {
+            try await pauseController.checkpoint()
+            await onProgress(item.relativePath)
+            let sourceURL = sourceRoot.appendingPathComponent(item.relativePath, isDirectory: item.kind == .directory)
+            let destinationURL = stageRoot.appendingPathComponent(item.relativePath, isDirectory: item.kind == .directory)
+            try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+            switch item.kind {
+            case .directory:
+                try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true)
+            case .symlink:
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    try fileManager.removeItem(at: destinationURL)
+                }
+                let target: String
+                if let symlinkDestination = item.symlinkDestination {
+                    target = symlinkDestination
+                } else {
+                    target = try fileManager.destinationOfSymbolicLink(atPath: sourceURL.path)
+                }
+                try fileManager.createSymbolicLink(atPath: destinationURL.path, withDestinationPath: target)
+            case .file:
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    try fileManager.removeItem(at: destinationURL)
+                }
+                try coordinatedCopy(from: sourceURL, to: destinationURL)
+            }
+        }
+    }
+
+    private func coordinatedCopy(from sourceURL: URL, to destinationURL: URL) throws {
+        var coordinationError: NSError?
+        var operationError: Error?
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        coordinator.coordinate(readingItemAt: sourceURL, options: [], error: &coordinationError) { readURL in
+            do {
+                try fileManager.copyItem(at: readURL, to: destinationURL)
+            } catch {
+                operationError = error
+            }
+        }
+        if let coordinationError {
+            throw coordinationError
+        }
+        if let operationError {
+            throw operationError
+        }
+    }
+
+    private func itemSortOrder(lhs: ScannedItem, rhs: ScannedItem) -> Bool {
+        let lhsRank = rank(for: lhs.kind)
+        let rhsRank = rank(for: rhs.kind)
+        if lhsRank == rhsRank {
+            return lhs.relativePath < rhs.relativePath
+        }
+        return lhsRank < rhsRank
+    }
+
+    private func rank(for kind: ItemKind) -> Int {
+        switch kind {
+        case .directory:
+            return 0
+        case .symlink:
+            return 1
+        case .file:
+            return 2
+        }
+    }
+}

@@ -1,0 +1,47 @@
+name: iCloudMaterializer
+options:
+  bundleIdPrefix: com.denniswestermann
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    MACOSX_DEPLOYMENT_TARGET: 15.0
+targets:
+  iCloudMaterializer:
+    type: application
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Sources/App
+        excludes:
+          - Info.plist
+      - path: Sources/UI
+      - path: Sources/Core
+        excludes:
+          - Pipeline/JobRunner.swift
+          - Planning
+          - Support
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.denniswestermann.iCloudMaterializer
+        PRODUCT_NAME: iCloudMaterializer
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Sources/App/Info.plist
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lsqlite3"
+    scheme:
+      testTargets:
+        - iCloudMaterializerTests
+  iCloudMaterializerTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Tests
+    dependencies:
+      - target: iCloudMaterializer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.denniswestermann.iCloudMaterializerTests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/iCloudMaterializer.app/Contents/MacOS/iCloudMaterializer"
