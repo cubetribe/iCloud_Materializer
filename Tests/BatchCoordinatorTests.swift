@@ -220,6 +220,33 @@ final class BatchCoordinatorTests: XCTestCase {
         XCTAssertTrue(plans.compactMap { $0.deletionManifestURL }.allSatisfy { fileManager.fileExists(atPath: $0.path) })
     }
 
+    func testDefaultPrefetchCandidatesRespectTransferPolicyExclusions() throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let projectRoot = workspace.appendingPathComponent("Alpha", isDirectory: true)
+        try fileManager.createDirectory(at: projectRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try fileManager.createDirectory(at: projectRoot.appendingPathComponent("src", isDirectory: true), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: projectRoot.appendingPathComponent("node_modules", isDirectory: true), withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: projectRoot.appendingPathComponent(".venv", isDirectory: true), withIntermediateDirectories: true)
+        try Data("DATABASE_URL=postgres://local".utf8).write(to: projectRoot.appendingPathComponent(".env", isDirectory: false))
+
+        let candidates = BatchCoordinator.prefetchCandidateURLs(
+            projectURL: projectRoot,
+            transferPolicy: TransferPolicy(mode: .codingProject),
+            childLimit: 8,
+            fileManager: fileManager
+        )
+
+        let candidateNames = Set(candidates.map(\.lastPathComponent))
+        XCTAssertTrue(candidateNames.contains("Alpha"))
+        XCTAssertTrue(candidateNames.contains("src"))
+        XCTAssertTrue(candidateNames.contains(".env"))
+        XCTAssertFalse(candidateNames.contains("node_modules"))
+        XCTAssertFalse(candidateNames.contains(".venv"))
+    }
+
     func testRunPrefetchesUpcomingProjectRoots() async throws {
         let fileManager = FileManager.default
         let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -235,7 +262,7 @@ final class BatchCoordinatorTests: XCTestCase {
 
         let prefetchRecorder = BatchPrefetchRecorder()
         let recorder = BatchUpdateRecorder()
-        let coordinator = BatchCoordinator(projectPrefetcher: { url in
+        let coordinator = BatchCoordinator(projectPrefetcher: { url, _, _ in
             await prefetchRecorder.record(url)
         })
         var configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
@@ -251,6 +278,81 @@ final class BatchCoordinatorTests: XCTestCase {
         let prefetchedNames = Set(await prefetchRecorder.paths().map { $0.lastPathComponent })
 
         XCTAssertEqual(prefetchedNames, Set(["Beta", "Gamma"]))
+    }
+
+    func testRunPrefetchesUpcomingProjectRootsAgainAfterResumeWithPersistedHint() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("BatchSource", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("BatchDestination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try createFixture(named: "Alpha", in: sourceRoot)
+        try createFixture(named: "Beta", in: sourceRoot)
+        try createFixture(named: "Gamma", in: sourceRoot)
+
+        var configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
+        configuration.projectPrefetchWindow = 2
+
+        let persisted = PersistedBatchRun(
+            snapshot: BatchSnapshot(
+                batchID: configuration.batchID,
+                state: .cancelled,
+                sourceRootPath: sourceRoot.path,
+                destinationRootPath: destinationRoot.path,
+                suffix: configuration.suffix,
+                totalProjects: 3,
+                completedProjects: 0,
+                warningProjects: 0,
+                failedProjects: 0,
+                conflictedProjects: 0,
+                readyForDeletionProjects: 0,
+                currentProjectIndex: 1,
+                currentProjectName: "Alpha",
+                startedAt: Date(timeIntervalSince1970: 10),
+                finishedAt: Date(timeIntervalSince1970: 20),
+                lastError: "Batch run cancelled."
+            ),
+            projects: [
+                BatchProjectPlan(
+                    id: UUID(),
+                    sourceURL: sourceRoot.appendingPathComponent("Beta", isDirectory: true),
+                    destinationRootURL: destinationRoot,
+                    sourceFolderName: "Beta",
+                    targetFolderName: "Beta-Lokal",
+                    state: .pending,
+                    detail: "Project root prefetch requested.",
+                    archiveURL: configuration.archiveRootURL.appendingPathComponent("Beta.zip", isDirectory: false),
+                    deletionManifestURL: configuration.deletionManifestRootURL.appendingPathComponent("Beta.json", isDirectory: false),
+                    readyForDeletion: false,
+                    startedAt: nil,
+                    finishedAt: nil
+                )
+            ],
+            updatedAt: Date(timeIntervalSince1970: 21)
+        )
+        try writePersistedBatch(persisted, to: configuration.resumeStateURL)
+
+        let prefetchRecorder = BatchPrefetchRecorder()
+        let recorder = BatchUpdateRecorder()
+        let coordinator = BatchCoordinator(projectPrefetcher: { url, _, _ in
+            await prefetchRecorder.record(url)
+        })
+
+        await coordinator.run(
+            configuration: configuration,
+            pauseController: PauseController()
+        ) { update in
+            await recorder.record(update)
+        }
+
+        let prefetchedNames = Set(await prefetchRecorder.paths().map { $0.lastPathComponent })
+        let plans = await recorder.lastBatchProjects()
+
+        XCTAssertEqual(prefetchedNames, Set(["Beta", "Gamma"]))
+        XCTAssertFalse(plans.first(where: { $0.sourceFolderName == "Beta" })?.detail?.contains("Project root prefetch requested.") ?? false)
     }
 
     private func makeConfiguration(sourceRoot: URL, destinationRoot: URL) -> BatchConfiguration {

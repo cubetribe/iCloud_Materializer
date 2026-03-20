@@ -71,7 +71,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
             )
             await log(
                 .info,
-                "Hydration window: \(configuration.hydrationWindow) active iCloud items per worker, up to \(configuration.hydrationWindow * configuration.workerCount) in flight overall",
+                "Hydration window: \(configuration.hydrationWindow) active iCloud items per worker, lookahead buffer \(configuration.effectiveHydrationPrefetchBuffer) overall, up to \(configuration.maxActiveHydrations) active / \(configuration.maxRequestedHydrations) requested overall",
                 jobID: configuration.jobID,
                 store: store,
                 onUpdate: onUpdate
@@ -128,10 +128,12 @@ final class MaterializerCoordinator: @unchecked Sendable {
             )
 
             let itemMap = Dictionary(uniqueKeysWithValues: items.map { ($0.relativePath, $0) })
+            let hydrationSession = HydrationSession(maxRequestedHydrations: configuration.maxRequestedHydrations)
             let outcomes = try await processChunks(
                 chunks: chunks,
                 itemMap: itemMap,
                 configuration: configuration,
+                hydrationSession: hydrationSession,
                 workingDirectories: workingDirectories,
                 pauseController: pauseController,
                 tracker: tracker,
@@ -203,6 +205,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
                     archiveRoot: workingDirectories.archiveRoot,
                     configuration: configuration,
                     downloadEngine: downloadEngine,
+                    hydrationSession: hydrationSession,
                     pauseController: pauseController,
                     onProgress: { path in
                         try? await tracker.updateTopLevelPhase(
@@ -259,6 +262,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
         chunks: [ChunkManifest],
         itemMap: [String: ScannedItem],
         configuration: JobConfiguration,
+        hydrationSession: HydrationSession,
         workingDirectories: WorkingDirectories,
         pauseController: PauseController,
         tracker: ProgressTracker,
@@ -279,6 +283,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
                         chunk: chunk,
                         itemMap: itemMap,
                         configuration: configuration,
+                        hydrationSession: hydrationSession,
                         workingDirectories: workingDirectories,
                         pauseController: pauseController,
                         tracker: tracker,
@@ -296,6 +301,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
                             chunk: nextChunk,
                             itemMap: itemMap,
                             configuration: configuration,
+                            hydrationSession: hydrationSession,
                             workingDirectories: workingDirectories,
                             pauseController: pauseController,
                             tracker: tracker,
@@ -314,6 +320,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
         chunk: ChunkManifest,
         itemMap: [String: ScannedItem],
         configuration: JobConfiguration,
+        hydrationSession: HydrationSession,
         workingDirectories: WorkingDirectories,
         pauseController: PauseController,
         tracker: ProgressTracker,
@@ -348,6 +355,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
                 sourceRoot: configuration.sourceURL,
                 configuration: configuration,
                 pauseController: pauseController,
+                hydrationSession: hydrationSession,
                 onEvent: { event in
                     switch event {
                     case .evaluating(let item):
@@ -469,7 +477,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
 
             await log(
                 .warning,
-                "Direct copy failed; switching \(workerLabel) to Finder recovery",
+                "Direct copy failed; switching \(workerLabel) to recovery copy",
                 jobID: configuration.jobID,
                 store: store,
                 onUpdate: onUpdate,
@@ -481,19 +489,20 @@ final class MaterializerCoordinator: @unchecked Sendable {
                     id: chunk.id,
                     label: workerLabel,
                     phase: .copying,
-                    detail: "Finder recovery copy",
+                    detail: "Recovery copy",
                     path: chunk.anchorRelativePath ?? chunk.relativePaths.first
                 )
                 try await finderRecoveryEngine.recoverChunk(
-                    chunk: chunk,
+                    items: items,
                     sourceRoot: configuration.sourceURL,
-                    stageRoot: stageRoot
+                    stageRoot: stageRoot,
+                    pauseController: pauseController
                 )
                 try await tracker.updateWorker(
                     id: chunk.id,
                     label: workerLabel,
                     phase: .verifying,
-                    detail: "Verifying Finder recovery result",
+                    detail: "Verifying recovery copy result",
                     path: chunk.anchorRelativePath ?? chunk.relativePaths.first
                 )
                 _ = try await verificationEngine.verify(expectedItems: items, at: stageRoot) { path in
@@ -501,7 +510,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
                         id: chunk.id,
                         label: workerLabel,
                         phase: .verifying,
-                        detail: "Verifying Finder recovery result",
+                        detail: "Verifying recovery copy result",
                         path: path
                     )
                 }
@@ -509,7 +518,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
                     id: chunk.id,
                     label: workerLabel,
                     phase: .promoting,
-                    detail: "Promoting Finder recovery result",
+                    detail: "Promoting recovery copy result",
                     path: chunk.anchorRelativePath ?? chunk.relativePaths.first
                 )
                 try await promotionEngine.promoteChunk(from: stageRoot, into: workingDirectories.assembledRoot)

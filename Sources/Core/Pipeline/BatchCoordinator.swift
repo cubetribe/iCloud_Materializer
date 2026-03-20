@@ -3,23 +3,77 @@ import Foundation
 final class BatchCoordinator: @unchecked Sendable {
     private let fileManager: FileManager
     private let coordinatorFactory: @Sendable () -> MaterializerCoordinator
-    private let projectPrefetcher: @Sendable (URL) async -> Void
+    private let projectPrefetcher: @Sendable (URL, TransferPolicy, Int) async -> Void
 
     init(
         fileManager: FileManager = .default,
         coordinatorFactory: @escaping @Sendable () -> MaterializerCoordinator = { MaterializerCoordinator() },
-        projectPrefetcher: @escaping @Sendable (URL) async -> Void = { url in
-            let resourceKeys: Set<URLResourceKey> = [.isUbiquitousItemKey]
-            guard let values = try? url.resourceValues(forKeys: resourceKeys),
-                  values.isUbiquitousItem == true else {
-                return
+        projectPrefetcher: @escaping @Sendable (URL, TransferPolicy, Int) async -> Void = { url, transferPolicy, scanDepth in
+            let fileManager = FileManager.default
+            let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey, .isUbiquitousItemKey]
+            let childLimit = min(max(scanDepth, 1), 32)
+            let candidates = BatchCoordinator.prefetchCandidateURLs(
+                projectURL: url,
+                transferPolicy: transferPolicy,
+                childLimit: childLimit,
+                fileManager: fileManager
+            )
+            var requested = 0
+            for candidate in candidates where requested < childLimit + 1 {
+                guard let values = try? candidate.resourceValues(forKeys: resourceKeys),
+                      values.isUbiquitousItem == true else {
+                    continue
+                }
+                try? fileManager.startDownloadingUbiquitousItem(at: candidate)
+                requested += 1
             }
-            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
         }
     ) {
         self.fileManager = fileManager
         self.coordinatorFactory = coordinatorFactory
         self.projectPrefetcher = projectPrefetcher
+    }
+
+    static func prefetchCandidateURLs(
+        projectURL: URL,
+        transferPolicy: TransferPolicy,
+        childLimit: Int,
+        fileManager: FileManager = .default
+    ) -> [URL] {
+        let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey]
+        var candidates: [URL] = [projectURL]
+        guard childLimit > 0 else { return candidates }
+
+        guard let children = try? fileManager.contentsOfDirectory(
+            at: projectURL,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: [.skipsPackageDescendants]
+        ) else {
+            return candidates
+        }
+
+        let sortedChildren = children.sorted { lhs, rhs in
+            let lhsValues = try? lhs.resourceValues(forKeys: resourceKeys)
+            let rhsValues = try? rhs.resourceValues(forKeys: resourceKeys)
+            let lhsIsDirectory = lhsValues?.isDirectory ?? false
+            let rhsIsDirectory = rhsValues?.isDirectory ?? false
+            if lhsIsDirectory != rhsIsDirectory {
+                return lhsIsDirectory && !rhsIsDirectory
+            }
+            return lhs.lastPathComponent.localizedCaseInsensitiveCompare(rhs.lastPathComponent) == .orderedAscending
+        }
+
+        for child in sortedChildren {
+            guard candidates.count < childLimit + 1 else { break }
+            let values = try? child.resourceValues(forKeys: resourceKeys)
+            let kind: ItemKind = (values?.isDirectory == true) ? .directory : .file
+            guard transferPolicy.scanDecision(relativePath: child.lastPathComponent, kind: kind) == .include else {
+                continue
+            }
+            candidates.append(child)
+        }
+
+        return candidates
     }
 
     func preview(configuration: BatchConfiguration) throws -> (snapshot: BatchSnapshot, projects: [BatchProjectPlan]) {
@@ -48,6 +102,7 @@ final class BatchCoordinator: @unchecked Sendable {
     ) async {
         var projects: [BatchProjectPlan] = []
         var startedAt = Date()
+        var prefetchedProjectSourcePaths: Set<String> = []
 
         do {
             try prepareBatchArtifacts(configuration: configuration)
@@ -77,7 +132,12 @@ final class BatchCoordinator: @unchecked Sendable {
                 projects[index].startedAt = Date()
                 projects[index].finishedAt = nil
                 projects[index].detail = retryDetail(for: projects[index])
-                await prefetchUpcomingProjects(from: index, projects: &projects, configuration: configuration)
+                await prefetchUpcomingProjects(
+                    from: index,
+                    projects: &projects,
+                    configuration: configuration,
+                    prefetchedProjectSourcePaths: &prefetchedProjectSourcePaths
+                )
 
                 let runningSnapshot = snapshot(
                     for: projects,
@@ -259,14 +319,14 @@ final class BatchCoordinator: @unchecked Sendable {
         merged.finishedAt = persisted.finishedAt
         merged.archiveURL = persisted.archiveURL ?? fresh.archiveURL
         merged.deletionManifestURL = persisted.deletionManifestURL ?? fresh.deletionManifestURL
-        merged.detail = persisted.detail ?? fresh.detail
+        merged.detail = sanitizedDetail(persisted.detail) ?? fresh.detail
 
         switch persisted.state {
         case .completed:
             if isRestorableCompleted(persisted) {
                 merged.state = .completed
                 merged.readyForDeletion = true
-                merged.detail = persisted.detail
+                merged.detail = sanitizedDetail(persisted.detail)
             } else {
                 merged.state = .failed
                 merged.readyForDeletion = false
@@ -275,7 +335,7 @@ final class BatchCoordinator: @unchecked Sendable {
         case .conflicted:
             merged.state = fresh.state == .conflicted ? .conflicted : .pending
             merged.readyForDeletion = false
-            merged.detail = merged.state == .conflicted ? (persisted.detail ?? fresh.detail) : nil
+            merged.detail = merged.state == .conflicted ? (sanitizedDetail(persisted.detail) ?? fresh.detail) : nil
         case .running:
             merged.state = .failed
             merged.readyForDeletion = false
@@ -283,7 +343,7 @@ final class BatchCoordinator: @unchecked Sendable {
         case .completedWithWarnings, .failed, .cancelled:
             merged.state = persisted.state
             merged.readyForDeletion = false
-            merged.detail = persisted.detail
+            merged.detail = sanitizedDetail(persisted.detail)
         case .pending:
             merged.readyForDeletion = false
         }
@@ -311,15 +371,18 @@ final class BatchCoordinator: @unchecked Sendable {
     private func prefetchUpcomingProjects(
         from currentIndex: Int,
         projects: inout [BatchProjectPlan],
-        configuration: BatchConfiguration
+        configuration: BatchConfiguration,
+        prefetchedProjectSourcePaths: inout Set<String>
     ) async {
         guard configuration.projectPrefetchWindow > 0 else { return }
 
         var remaining = configuration.projectPrefetchWindow
         for nextIndex in projects.indices where nextIndex > currentIndex {
             guard remaining > 0 else { break }
-            guard shouldPrefetch(projects[nextIndex]) else { continue }
-            await projectPrefetcher(projects[nextIndex].sourceURL)
+            guard shouldPrefetch(projects[nextIndex], prefetchedProjectSourcePaths: prefetchedProjectSourcePaths) else { continue }
+            let prefetchDepth = configuration.jobConfiguration(for: projects[nextIndex]).localPrefetchScanDepth
+            await projectPrefetcher(projects[nextIndex].sourceURL, configuration.transferPolicy, prefetchDepth)
+            prefetchedProjectSourcePaths.insert(projects[nextIndex].sourceURL.standardizedFileURL.path)
             let hint = "Project root prefetch requested."
             if projects[nextIndex].detail?.contains(hint) != true {
                 projects[nextIndex].detail = [projects[nextIndex].detail, hint]
@@ -330,13 +393,26 @@ final class BatchCoordinator: @unchecked Sendable {
         }
     }
 
-    private func shouldPrefetch(_ project: BatchProjectPlan) -> Bool {
+    private func shouldPrefetch(_ project: BatchProjectPlan, prefetchedProjectSourcePaths: Set<String>) -> Bool {
+        guard !prefetchedProjectSourcePaths.contains(project.sourceURL.standardizedFileURL.path) else {
+            return false
+        }
         switch project.state {
         case .pending, .failed, .cancelled, .completedWithWarnings:
-            return project.detail?.contains("Project root prefetch requested.") != true
+            return true
         case .running, .completed, .conflicted:
             return false
         }
+    }
+
+    private func sanitizedDetail(_ detail: String?) -> String? {
+        guard let detail else { return nil }
+        let sanitizedLines = detail
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { $0 != "Project root prefetch requested." }
+        guard !sanitizedLines.isEmpty else { return nil }
+        return sanitizedLines.joined(separator: "\n")
     }
 
     private func previewLastError(from snapshot: BatchSnapshot?, projects: [BatchProjectPlan]) -> String? {

@@ -9,6 +9,7 @@ actor ZipEngine {
         archiveRoot: URL,
         configuration: JobConfiguration,
         downloadEngine: DownloadEngine,
+        hydrationSession: HydrationSession,
         pauseController: PauseController,
         onProgress: @escaping @Sendable (String) async -> Void
     ) async throws -> URL {
@@ -17,6 +18,7 @@ actor ZipEngine {
             sourceRoot: sourceRoot,
             configuration: configuration,
             pauseController: pauseController,
+            hydrationSession: hydrationSession,
             onEvent: { event in
                 switch event {
                 case .evaluating(let item), .ready(let item, _), .deferred(let item, _):

@@ -328,8 +328,9 @@ struct JobConfiguration: Sendable {
     var retryCount: Int
     var backoffSchedule: [Duration]
     var maxHydrationWait: Duration
-    var hydrationHotSlotDuration: Duration = .seconds(6)
-    var hydrationCooldownSchedule: [Duration] = [.seconds(15), .seconds(60), .seconds(180)]
+    var hydrationPrefetchWindow: Int = 24
+    var hydrationHotSlotDuration: Duration = .seconds(4)
+    var hydrationCooldownSchedule: [Duration] = [.seconds(10), .seconds(45), .seconds(120)]
     var allowTargetQuarantine: Bool
     var enableFinderFallback: Bool
 
@@ -345,6 +346,24 @@ struct JobConfiguration: Sendable {
 
     var databaseURL: URL {
         workingRootURL.appendingPathComponent("state.sqlite", isDirectory: false)
+    }
+
+    var maxActiveHydrations: Int {
+        max(workerCount, 1) * max(hydrationWindow, 1)
+    }
+
+    var effectiveHydrationPrefetchBuffer: Int {
+        let configuredBuffer = max(hydrationPrefetchWindow, 0)
+        let conservativeCap = max(8, maxActiveHydrations / 2)
+        return min(configuredBuffer, conservativeCap)
+    }
+
+    var maxRequestedHydrations: Int {
+        maxActiveHydrations + effectiveHydrationPrefetchBuffer
+    }
+
+    var localPrefetchScanDepth: Int {
+        max(hydrationWindow, 1) + effectiveHydrationPrefetchBuffer
     }
 }
 
@@ -362,7 +381,7 @@ struct BatchConfiguration: Sendable {
     var backoffSchedule: [Duration]
     var maxHydrationWait: Duration
     var enableFinderFallback: Bool
-    var projectPrefetchWindow: Int = 2
+    var projectPrefetchWindow: Int = 4
 
     var archiveRootURL: URL {
         sourceRootURL.appendingPathComponent("_Materializer_Archives", isDirectory: true)

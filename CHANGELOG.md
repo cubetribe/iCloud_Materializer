@@ -27,6 +27,8 @@ This repository does not use automated releases yet. Until the first tagged rele
 - The UI now exposes stalled-run health signals to make long iCloud operations easier to monitor.
 - Batch runs now prewarm the next project roots and split hydration-heavy directories earlier, so large iCloud trees can use the worker pool more effectively.
 - Hydration workers now rotate slow iCloud items out of hot slots after a short window, cool them down on a retry schedule, and keep other files moving instead of stalling the pipeline.
+- Hydration now uses a bounded prefetch buffer ahead of active slots so iCloud downloads can be requested earlier without letting the queue grow unbounded.
+- Batch prewarm now touches each upcoming project root plus a small set of direct children so directory-local iCloud content starts hydrating sooner, and resumed runs can prewarm those projects again.
 - README expanded into an operational guide covering run modes, safety model, runtime artifacts, resume behavior, and repo relocation.
 
 ### Fixed
@@ -34,3 +36,4 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Hardened batch resume so already completed restorable projects can be skipped safely on reruns.
 - Improved batch target naming so naming strategy is explicit and previewed before runs start.
 - Added a planner safety budget so pathological directory shapes cannot leave long batch runs spinning indefinitely in `planningChunks`.
+- Replaced Finder-scripted recovery copies with a cancellable `ditto`-based recovery path so aborting a batch no longer leaves delayed system-level copy jobs running in the background.
