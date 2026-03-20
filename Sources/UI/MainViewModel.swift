@@ -9,11 +9,12 @@ final class MainViewModel {
     var runMode: RunMode = .singleProject
     var transferMode: TransferMode = .exactCopy
     var priorityMode: TransferPriorityMode = .criticalFirst
+    var batchNamingMode: BatchNamingMode = .suffix
     var batchSuffix: String = "Lokal"
     var customExcludedDirectoryNamesText: String = ""
     var customExcludedFileExtensionsText: String = ""
     var snapshot: JobSnapshot = .idle(source: nil, destination: nil)
-    var batchSnapshot: BatchSnapshot = .idle(sourceRoot: nil, destinationRoot: nil, suffix: "Lokal")
+    var batchSnapshot: BatchSnapshot = .idle(sourceRoot: nil, destinationRoot: nil, suffix: "Suffix: -Lokal")
     var batchProjects: [BatchProjectPlan] = []
     var activities: [WorkerActivity] = []
     var logs: [LogEntry] = []
@@ -65,6 +66,56 @@ final class MainViewModel {
 
     var priorityPolicy: TransferPriorityPolicy {
         TransferPriorityPolicy(mode: priorityMode)
+    }
+
+    var batchNamingFieldPrompt: String {
+        switch batchNamingMode {
+        case .suffix:
+            return "Suffix, e.g. Lokal or -Lokal"
+        case .prefix:
+            return "Prefix, e.g. Lokal or Lokal-"
+        case .template:
+            return "Template with {name}, e.g. {name}-Lokal"
+        }
+    }
+
+    var batchNamingPreviewText: String {
+        let configuration = BatchConfiguration(
+            batchID: UUID(),
+            sourceRootURL: URL(fileURLWithPath: "/tmp/source-root", isDirectory: true),
+            destinationRootURL: URL(fileURLWithPath: "/tmp/destination-root", isDirectory: true),
+            namingMode: batchNamingMode,
+            suffix: batchSuffix,
+            transferPolicy: transferPolicy,
+            priorityPolicy: priorityPolicy,
+            workerCount: 4,
+            hydrationWindow: 4,
+            retryCount: 1,
+            backoffSchedule: [.seconds(0)],
+            maxHydrationWait: .seconds(1),
+            enableFinderFallback: false
+        )
+        let sample = configuration.targetFolderName(for: "ExampleProject")
+        return "Each direct subfolder becomes its own project run. Targets will be created under the destination root as `\(sample)`."
+    }
+
+    var batchNamingSummary: String {
+        let configuration = BatchConfiguration(
+            batchID: UUID(),
+            sourceRootURL: URL(fileURLWithPath: "/tmp/source-root", isDirectory: true),
+            destinationRootURL: URL(fileURLWithPath: "/tmp/destination-root", isDirectory: true),
+            namingMode: batchNamingMode,
+            suffix: batchSuffix,
+            transferPolicy: transferPolicy,
+            priorityPolicy: priorityPolicy,
+            workerCount: 4,
+            hydrationWindow: 4,
+            retryCount: 1,
+            backoffSchedule: [.seconds(0)],
+            maxHydrationWait: .seconds(1),
+            enableFinderFallback: false
+        )
+        return configuration.namingSummary
     }
 
     func chooseSourceFolder() {
@@ -152,12 +203,12 @@ final class MainViewModel {
     func rebuildBatchPreview() {
         guard runMode == .batchQueue else {
             batchProjects = []
-            batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
+            batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchNamingSummary)
             return
         }
         guard let sourceURL, let destinationURL else {
             batchProjects = []
-            batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
+            batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchNamingSummary)
             return
         }
 
@@ -173,7 +224,7 @@ final class MainViewModel {
                 state: .idle,
                 sourceRootPath: sourceURL.path,
                 destinationRootPath: destinationURL.path,
-                suffix: batchSuffix,
+                suffix: batchNamingSummary,
                 totalProjects: 0,
                 completedProjects: 0,
                 warningProjects: 0,
@@ -217,7 +268,7 @@ final class MainViewModel {
     private func startBatchRun(sourceURL: URL, destinationURL: URL) {
         let configuration = makeBatchConfiguration(sourceURL: sourceURL, destinationURL: destinationURL)
         prepareForRun(sourceURL: sourceURL, destinationURL: destinationURL)
-        batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
+        batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchNamingSummary)
         batchSnapshot.batchID = configuration.batchID
         batchProjects = []
         jobTask = Task {
@@ -233,6 +284,7 @@ final class MainViewModel {
             batchID: UUID(),
             sourceRootURL: sourceURL,
             destinationRootURL: destinationURL,
+            namingMode: batchNamingMode,
             suffix: batchSuffix,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
@@ -250,7 +302,7 @@ final class MainViewModel {
         activities.removeAll()
         failures.removeAll()
         snapshot = .idle(source: sourceURL, destination: destinationURL)
-        batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
+        batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchNamingSummary)
         pauseController = PauseController()
         isPaused = false
         lastProgressAt = Date()
@@ -296,7 +348,7 @@ final class MainViewModel {
         snapshot = .idle(source: sourceURL, destination: destinationURL)
         snapshot.lastError = nil
         activities = []
-        batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchSuffix)
+        batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchNamingSummary)
         batchProjects = []
         lastProgressAt = nil
         if runMode == .batchQueue {

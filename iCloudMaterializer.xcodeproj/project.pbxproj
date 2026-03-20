@@ -36,6 +36,7 @@
 		D02351E9BB5AA9567C97812A /* JobStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 754B4B5E530B90690DB02E06 /* JobStore.swift */; };
 		D53EC15AA53F4D0619D63854 /* MaterializerCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90D3563BCCDEF33C52AF39D9 /* MaterializerCoordinator.swift */; };
 		DABC699DA49D7B91BDF214C9 /* TransferPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B444C7FD975FC55DEEAAACDC /* TransferPolicyTests.swift */; };
+		DFCA45CB5111DD8123219AC3 /* BatchNamingModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5000DA6A505EF2FF86288C16 /* BatchNamingModeTests.swift */; };
 		E63C7B966D3419EF91C8DCC5 /* ChunkPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29EBEC81A942B8865C95FD7C /* ChunkPlanner.swift */; };
 		E8B4FD3C47D2FA503E41AB38 /* VerificationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CECD4747EA4DF854FFD805F /* VerificationEngine.swift */; };
 		FCD747E115FDBF10338DDF48 /* PromotionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B5DC8B06FDBD930E3A526C8 /* PromotionEngine.swift */; };
@@ -67,6 +68,7 @@
 		469468CAC9BD136E14987B49 /* DownloadEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadEngine.swift; sourceTree = "<group>"; };
 		47A51C1E42687846D60C1DEE /* CopyEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyEngine.swift; sourceTree = "<group>"; };
 		498B95691163A19854ADCD47 /* ChunkPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChunkPlannerTests.swift; sourceTree = "<group>"; };
+		5000DA6A505EF2FF86288C16 /* BatchNamingModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchNamingModeTests.swift; sourceTree = "<group>"; };
 		5DF7CA8D33022C9CCEF90A0B /* ZipEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZipEngine.swift; sourceTree = "<group>"; };
 		6C59DA2259E83812C725E071 /* iCloudMaterializerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iCloudMaterializerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		6EAC89D9501B6BA29E255EC3 /* AppLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogger.swift; sourceTree = "<group>"; };
@@ -166,6 +168,7 @@
 			isa = PBXGroup;
 			children = (
 				7DACA3E173CA94BA250651B2 /* BatchCoordinatorTests.swift */,
+				5000DA6A505EF2FF86288C16 /* BatchNamingModeTests.swift */,
 				498B95691163A19854ADCD47 /* ChunkPlannerTests.swift */,
 				B2851A9A4F4251F075B2C8D9 /* DownloadEngineTests.swift */,
 				24BA13DD00EEA77F8DEC5A70 /* JobStoreTests.swift */,
@@ -371,6 +374,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1230ABD9384CEEFE19541E9F /* BatchCoordinatorTests.swift in Sources */,
+				DFCA45CB5111DD8123219AC3 /* BatchNamingModeTests.swift in Sources */,
 				308A6426116F098F25FB20C9 /* ChunkPlannerTests.swift in Sources */,
 				926F875AF14DA00BBE23F48A /* DownloadEngineTests.swift in Sources */,
 				02976F7A31A30AEF56400048 /* JobStoreTests.swift in Sources */,

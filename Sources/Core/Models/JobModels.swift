@@ -41,6 +41,36 @@ enum RunMode: String, Codable, Sendable, CaseIterable, Identifiable {
     }
 }
 
+enum BatchNamingMode: String, Codable, Sendable, CaseIterable, Identifiable {
+    case suffix
+    case prefix
+    case template
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .suffix:
+            return "Suffix"
+        case .prefix:
+            return "Prefix"
+        case .template:
+            return "Template"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .suffix:
+            return "Append a value like `-Lokal` after each project name."
+        case .prefix:
+            return "Prepend a value like `Lokal-` before each project name."
+        case .template:
+            return "Use a full template with `{name}`, for example `{name}-Lokal` or `Lokal-{name}`."
+        }
+    }
+}
+
 enum BatchState: String, Codable, Sendable, CaseIterable {
     case idle
     case running
@@ -320,6 +350,7 @@ struct BatchConfiguration: Sendable {
     var batchID: UUID
     var sourceRootURL: URL
     var destinationRootURL: URL
+    var namingMode: BatchNamingMode = .suffix
     var suffix: String
     var transferPolicy: TransferPolicy
     var priorityPolicy: TransferPriorityPolicy
@@ -356,8 +387,16 @@ struct BatchConfiguration: Sendable {
     var resumeKey: String {
         let source = sourceRootURL.standardizedFileURL.path.lowercased()
         let destination = destinationRootURL.standardizedFileURL.path.lowercased()
-        let suffixPart = effectiveSuffix.lowercased()
-        let payload = "\(source)|\(destination)|\(suffixPart)"
+        let namingKey: String
+        switch namingMode {
+        case .suffix:
+            namingKey = effectiveSuffix.lowercased()
+        case .prefix:
+            namingKey = "prefix:\(effectivePrefix.lowercased())"
+        case .template:
+            namingKey = "template:\(effectiveTemplate.lowercased())"
+        }
+        let payload = "\(source)|\(destination)|\(namingKey)"
         return payload
             .unicodeScalars
             .map { scalar -> String in
@@ -378,8 +417,44 @@ struct BatchConfiguration: Sendable {
         return "-\(trimmed)"
     }
 
+    var effectivePrefix: String {
+        let trimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if trimmed.hasSuffix("-") || trimmed.hasSuffix("_") || trimmed.hasSuffix(" ") {
+            return trimmed
+        }
+        return "\(trimmed)-"
+    }
+
+    var effectiveTemplate: String {
+        let trimmed = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "{name}" }
+        if trimmed.contains("{name}") {
+            return trimmed
+        }
+        return "{name}-\(trimmed)"
+    }
+
+    var namingSummary: String {
+        switch namingMode {
+        case .suffix:
+            return effectiveSuffix.isEmpty ? "Suffix: none" : "Suffix: \(effectiveSuffix)"
+        case .prefix:
+            return effectivePrefix.isEmpty ? "Prefix: none" : "Prefix: \(effectivePrefix)"
+        case .template:
+            return "Template: \(effectiveTemplate)"
+        }
+    }
+
     func targetFolderName(for projectName: String) -> String {
-        projectName + effectiveSuffix
+        switch namingMode {
+        case .suffix:
+            return projectName + effectiveSuffix
+        case .prefix:
+            return effectivePrefix + projectName
+        case .template:
+            return effectiveTemplate.replacingOccurrences(of: "{name}", with: projectName)
+        }
     }
 
     func jobConfiguration(for plan: BatchProjectPlan) -> JobConfiguration {

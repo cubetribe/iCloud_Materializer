@@ -126,13 +126,29 @@ struct MainView: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     if viewModel.runMode == .batchQueue {
-                        TextField("Suffix, e.g. Lokal or Copy", text: $viewModel.batchSuffix)
+                        Picker("Batch Naming", selection: $viewModel.batchNamingMode) {
+                            ForEach(BatchNamingMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .disabled(viewModel.isRunning)
+                        .onChange(of: viewModel.batchNamingMode, initial: false) { _, _ in
+                            viewModel.rebuildBatchPreview()
+                        }
+
+                        Text(viewModel.batchNamingMode.subtitle)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        TextField(viewModel.batchNamingFieldPrompt, text: $viewModel.batchSuffix)
                             .textFieldStyle(.roundedBorder)
                             .disabled(viewModel.isRunning)
                             .onChange(of: viewModel.batchSuffix, initial: false) { _, _ in
                                 viewModel.rebuildBatchPreview()
                             }
-                        Text(batchSuffixPreviewText)
+                        Text(viewModel.batchNamingPreviewText)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -652,19 +668,6 @@ struct MainView: View {
             return "-"
         }
         return "\(index)/\(max(viewModel.batchSnapshot.totalProjects, index)) \(name)"
-    }
-
-    private var batchSuffixPreviewText: String {
-        let trimmed = viewModel.batchSuffix.trimmingCharacters(in: .whitespacesAndNewlines)
-        let suffix: String
-        if trimmed.isEmpty {
-            suffix = ""
-        } else if trimmed.hasPrefix("-") || trimmed.hasPrefix("_") || trimmed.hasPrefix(" ") {
-            suffix = trimmed
-        } else {
-            suffix = "-\(trimmed)"
-        }
-        return "Each direct subfolder becomes its own project run. Targets are created under the destination root as `<name>\(suffix)` unless you already include your own leading separator."
     }
 
     private func formattedBytes(_ bytes: Int64) -> String {

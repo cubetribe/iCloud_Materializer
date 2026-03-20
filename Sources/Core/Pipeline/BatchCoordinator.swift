@@ -420,7 +420,7 @@ final class BatchCoordinator: @unchecked Sendable {
             state: state,
             sourceRootPath: configuration.sourceRootURL.path,
             destinationRootPath: configuration.destinationRootURL.path,
-            suffix: configuration.suffix,
+            suffix: configuration.namingSummary,
             totalProjects: projects.count,
             completedProjects: projects.filter { $0.state == .completed }.count,
             warningProjects: projects.filter { $0.state == .completedWithWarnings }.count,
