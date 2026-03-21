@@ -215,6 +215,119 @@ final class MaterializerCoordinatorTests: XCTestCase {
         XCTAssertEqual(verification.verifiedCount, persistedItems.count)
     }
 
+    func testCoordinatorDiscardsPersistedInventoryContainingInternalArtifacts() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("SourceProject", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("Destination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try createFixture(at: sourceRoot)
+        let archiveRoot = sourceRoot.appendingPathComponent("_Materializer_Archives", isDirectory: true)
+        try fileManager.createDirectory(at: archiveRoot, withIntermediateDirectories: true)
+        try Data("zip".utf8).write(to: archiveRoot.appendingPathComponent("fixture.zip"))
+
+        var configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
+        configuration.jobID = JobConfiguration.resumeJobID(
+            sourceURL: sourceRoot,
+            destinationURL: destinationRoot,
+            targetFolderName: nil,
+            transferPolicy: configuration.transferPolicy
+        )
+
+        let expectedItems = try await ScanEngine().scan(sourceRoot: sourceRoot, transferPolicy: configuration.transferPolicy)
+        var persistedItems = expectedItems
+        persistedItems.append(
+            ScannedItem(
+                id: UUID(),
+                relativePath: "_Materializer_Archives",
+                kind: .directory,
+                expectedSize: 0,
+                isHidden: false,
+                isUbiquitous: false,
+                isLocalReady: true,
+                downloadStatusRaw: nil,
+                symlinkDestination: nil,
+                hydrationState: .ready,
+                hydrationError: nil,
+                state: .pending,
+                lastError: nil
+            )
+        )
+        persistedItems.append(
+            ScannedItem(
+                id: UUID(),
+                relativePath: "_Materializer_Archives/fixture.zip",
+                kind: .file,
+                expectedSize: 3,
+                isHidden: false,
+                isUbiquitous: false,
+                isLocalReady: true,
+                downloadStatusRaw: nil,
+                symlinkDestination: nil,
+                hydrationState: .ready,
+                hydrationError: nil,
+                state: .pending,
+                lastError: nil
+            )
+        )
+
+        let store = try JobStore(databaseURL: configuration.databaseURL)
+        try await store.saveJobSnapshot(
+            JobSnapshot(
+                jobID: configuration.jobID,
+                phase: .failed,
+                phaseDetail: "Previous session ended during scan",
+                sourcePath: sourceRoot.path,
+                destinationPath: destinationRoot.path,
+                currentPath: nil,
+                totalDiscovered: persistedItems.count,
+                totalDownloaded: 0,
+                totalCopied: 0,
+                totalFailed: 0,
+                plannedChunks: 0,
+                processedChunks: 0,
+                estimatedRemainingCount: persistedItems.count,
+                throughputItemsPerSecond: 0,
+                throughputBytesPerSecond: 0,
+                totalExpectedBytes: persistedItems.expectedBytes,
+                copiedBytes: 0,
+                activeWorkerCount: 0,
+                estimatedRemainingSeconds: nil,
+                preflightReport: nil,
+                hydrationMetrics: HydrationMetrics(),
+                startedAt: Date(timeIntervalSince1970: 100),
+                finishedAt: Date(timeIntervalSince1970: 110),
+                lastError: "Interrupted during scan"
+            )
+        )
+        try await store.saveItems(jobID: configuration.jobID, items: persistedItems)
+        try await store.close()
+
+        let recorder = UpdateRecorder()
+        let coordinator = MaterializerCoordinator()
+
+        await coordinator.run(
+            configuration: configuration,
+            pauseController: PauseController()
+        ) { update in
+            await recorder.record(update)
+        }
+
+        let snapshot = await recorder.lastSnapshot()
+        let logMessages = await recorder.logMessages()
+        XCTAssertEqual(snapshot?.phase, .completed)
+        XCTAssertTrue(logMessages.contains(where: { $0.contains("Discarding persisted discovery inventory because it contains internal rescue artifacts") }))
+        XCTAssertFalse(logMessages.contains(where: { $0.contains("Resuming from persisted discovery inventory") }))
+
+        let visibleTarget = destinationRoot.appendingPathComponent(sourceRoot.lastPathComponent, isDirectory: true)
+        let verification = try await VerificationEngine().verify(expectedItems: expectedItems, at: visibleTarget)
+        XCTAssertEqual(verification.verifiedCount, expectedItems.count)
+        XCTAssertFalse(fileManager.fileExists(atPath: visibleTarget.appendingPathComponent("_Materializer_Archives", isDirectory: true).path))
+    }
+
     private func makeConfiguration(
         sourceRoot: URL,
         destinationRoot: URL,

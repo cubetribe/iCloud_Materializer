@@ -52,3 +52,4 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Added a planner safety budget so pathological directory shapes cannot leave long batch runs spinning indefinitely in `planningChunks`.
 - Replaced Finder-scripted recovery copies with a cancellable `ditto`-based recovery path so aborting a batch no longer leaves delayed system-level copy jobs running in the background.
 - Removed silent iCloud download-request failures so rejected hydration requests surface immediately in logs, state, and failure handling.
+- Fixed a single-project retry failure where persisted discovery inventories could resurrect internal rescue artifacts like `_Materializer_Archives` and stop the run with a terminal `Fail` instead of rescanning cleanly.

@@ -18,7 +18,7 @@ enum TransferMode: String, Codable, Sendable, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .exactCopy:
-            return "Copy everything exactly as-is."
+            return "Copy everything exactly as-is, except app-generated rescue artifacts."
         case .codingProject:
             return "Skip clearly rebuildable environments and caches."
         }
@@ -79,7 +79,12 @@ struct TransferPolicy: Hashable, Sendable {
                 TransferRuleDescriptor(
                     id: "exact-copy",
                     title: "Exact copy",
-                    detail: "No folders or file types are excluded."
+                    detail: "Project content is copied as-is."
+                ),
+                TransferRuleDescriptor(
+                    id: "internal-artifacts",
+                    title: "Internal rescue artifacts",
+                    detail: "Always skip app-generated rescue folders like .icloud-materializer and _Materializer_Archives."
                 )
             ]
         }
@@ -131,6 +136,10 @@ struct TransferPolicy: Hashable, Sendable {
     }
 
     func scanDecision(relativePath: String, kind: ItemKind) -> ScanFilterDecision {
+        if let internalArtifactDecision = Self.internalArtifactScanDecision(relativePath: relativePath, kind: kind) {
+            return internalArtifactDecision
+        }
+
         guard mode == .codingProject else {
             return .include
         }
@@ -159,10 +168,21 @@ struct TransferPolicy: Hashable, Sendable {
     var runtimeSummary: String {
         switch mode {
         case .exactCopy:
-            return "Transfer mode: Exact Copy"
+            return "Transfer mode: Exact Copy (excluding internal rescue artifacts)"
         case .codingProject:
             return "Transfer mode: Coding Project with conservative exclusions"
         }
+    }
+
+    static func isInternalArtifactPath(_ relativePath: String) -> Bool {
+        guard let firstComponent = firstPathComponent(of: relativePath) else {
+            return false
+        }
+        return internalArtifactDirectoryNames.contains(firstComponent.lowercased())
+    }
+
+    static func isInternalArtifactDirectoryName(_ directoryName: String) -> Bool {
+        internalArtifactDirectoryNames.contains(directoryName.lowercased())
     }
 
     var resumeFingerprint: String {
@@ -212,6 +232,32 @@ struct TransferPolicy: Hashable, Sendable {
             .filter { !$0.isEmpty }
         )
     }
+
+    private static func firstPathComponent(of relativePath: String) -> String? {
+        relativePath
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .first
+            .map(String.init)
+    }
+
+    private static func internalArtifactScanDecision(relativePath: String, kind: ItemKind) -> ScanFilterDecision? {
+        guard let firstComponent = firstPathComponent(of: relativePath),
+              internalArtifactDirectoryNames.contains(firstComponent.lowercased()) else {
+            return nil
+        }
+
+        switch kind {
+        case .directory:
+            return .excludeDescendants(reason: "Excluded internal rescue directory \(firstComponent)")
+        case .file, .symlink:
+            return .excludeItem(reason: "Excluded internal rescue artifact \(firstComponent)")
+        }
+    }
+
+    private static let internalArtifactDirectoryNames: Set<String> = [
+        "_materializer_archives",
+        ".icloud-materializer"
+    ]
 
     private static let builtinExcludedDirectoryNames: Set<String> = [
         ".venv",

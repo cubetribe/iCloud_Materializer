@@ -51,7 +51,11 @@ final class MaterializerCoordinator: @unchecked Sendable {
                 }
             }
             try validateDestinationLayout(configuration: configuration)
-            let resumeInventory = try await loadResumeInventory(configuration: configuration, store: store)
+            let resumeInventory = try await loadResumeInventory(
+                configuration: configuration,
+                store: store,
+                onUpdate: onUpdate
+            )
             let workingDirectories = try await promotionEngine.prepare(configuration: configuration)
             try await promotionEngine.quarantineExistingVisibleTargetIfNeeded(
                 configuration: configuration,
@@ -890,7 +894,8 @@ final class MaterializerCoordinator: @unchecked Sendable {
 
     private func loadResumeInventory(
         configuration: JobConfiguration,
-        store: JobStore
+        store: JobStore,
+        onUpdate: @escaping @Sendable (JobUpdate) async -> Void
     ) async throws -> ResumeInventory? {
         guard let snapshot = try await store.loadSnapshot(jobID: configuration.jobID) else {
             return nil
@@ -907,6 +912,17 @@ final class MaterializerCoordinator: @unchecked Sendable {
         }
         let items = try await store.loadItems(jobID: configuration.jobID)
         guard !items.isEmpty else {
+            return nil
+        }
+        if let invalidItem = items.first(where: { TransferPolicy.isInternalArtifactPath($0.relativePath) }) {
+            await log(
+                .warning,
+                "Discarding persisted discovery inventory because it contains internal rescue artifacts (\(invalidItem.relativePath))",
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate,
+                path: configuration.sourceURL.path
+            )
             return nil
         }
         return ResumeInventory(snapshot: snapshot, items: items)

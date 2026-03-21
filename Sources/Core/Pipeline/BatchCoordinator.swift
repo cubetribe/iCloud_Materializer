@@ -329,7 +329,7 @@ final class BatchCoordinator: @unchecked Sendable {
         )
 
         let projectRoots = try childURLs
-            .filter { $0.lastPathComponent != ".icloud-materializer" && $0.lastPathComponent != "_Materializer_Archives" }
+            .filter { !TransferPolicy.isInternalArtifactDirectoryName($0.lastPathComponent) }
             .compactMap { url -> ProjectRootDescriptor? in
                 let values = try url.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey, .attributeModificationDateKey, .creationDateKey])
                 guard values.isDirectory == true else {

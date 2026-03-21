@@ -145,6 +145,10 @@ The app has two transfer-scope presets.
 
 `Exact Copy` inventories and copies everything it can see, including hidden files and dotfiles.
 
+Always excluded anyway:
+- app-generated rescue/runtime folders such as `.icloud-materializer` and `_Materializer_Archives`
+- stale persisted inventories that still reference those internal rescue artifacts are discarded and rebuilt from a fresh scan
+
 ### Coding Project
 
 `Coding Project` excludes clearly rebuildable or generated content so large project trees can move faster and more safely.
