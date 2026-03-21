@@ -1,5 +1,12 @@
 import Foundation
 
+struct ProgressHealthSnapshot: Sendable {
+    var health: RunHealthState
+    var phase: JobPhase
+    var detail: String?
+    var path: String?
+}
+
 actor ProgressTracker {
     private var snapshot: JobSnapshot
     private var activities: [UUID: WorkerActivity] = [:]
@@ -7,6 +14,7 @@ actor ProgressTracker {
     private let store: JobStore
     private let onUpdate: @Sendable (JobUpdate) async -> Void
     private var lastPublishedAt: Date = .distantPast
+    private var lastProgressAt: Date?
     private let publishInterval: TimeInterval = 0.25
 
     init(
@@ -17,6 +25,7 @@ actor ProgressTracker {
         self.snapshot = snapshot
         self.store = store
         self.onUpdate = onUpdate
+        self.lastProgressAt = snapshot.startedAt
     }
 
     func recordPreflight(_ report: PreflightReport) async throws {
@@ -24,6 +33,7 @@ actor ProgressTracker {
         snapshot.phaseDetail = report.canStart ? "Preflight passed" : "Preflight needs attention"
         snapshot.currentPath = nil
         snapshot.preflightReport = report
+        noteProgress()
         recalculateRates()
         try await publish(force: true)
     }
@@ -32,6 +42,7 @@ actor ProgressTracker {
         snapshot.phase = .discovering
         snapshot.phaseDetail = detail
         snapshot.currentPath = path
+        noteProgress()
         try await publish(force: true)
     }
 
@@ -53,6 +64,7 @@ actor ProgressTracker {
         snapshot.lastError = nil
         hydrationStates = Dictionary(uniqueKeysWithValues: items.map { ($0.relativePath, $0.hydrationState) })
         snapshot.hydrationMetrics = HydrationMetrics(timeToFirstDiscoveredSeconds: 0)
+        noteProgress()
         recalculateHydrationMetrics()
         recalculateRates()
         try await publish(force: true)
@@ -73,6 +85,7 @@ actor ProgressTracker {
         hydrationStates[item.relativePath] = item.hydrationState
         recalculateHydrationMetrics()
         snapshot.estimatedRemainingCount = 0
+        noteProgress()
         recalculateRates()
         try await publish(force: false)
     }
@@ -83,6 +96,7 @@ actor ProgressTracker {
         snapshot.currentPath = nil
         snapshot.plannedChunks += chunkCount
         snapshot.estimatedRemainingCount = max(0, snapshot.totalDiscovered - snapshot.totalCopied - snapshot.totalFailed)
+        noteProgress()
         recalculateRates()
         try await publish(force: true)
     }
@@ -91,6 +105,7 @@ actor ProgressTracker {
         snapshot.phase = phase
         snapshot.phaseDetail = detail
         snapshot.currentPath = path
+        noteProgress()
         recalculateRates()
         try await publish(force: force)
     }
@@ -114,6 +129,7 @@ actor ProgressTracker {
         snapshot.currentPath = path ?? snapshot.currentPath
         snapshot.phaseDetail = detail
         snapshot.activeWorkerCount = activities.count
+        noteProgress()
         recalculateRates()
         try await publish(force: false)
     }
@@ -145,6 +161,7 @@ actor ProgressTracker {
             snapshot.lastError = item.hydrationError ?? snapshot.lastError
         }
         recalculateHydrationMetrics()
+        noteProgress()
         recalculateRates()
         try await publish(force: false)
     }
@@ -160,6 +177,7 @@ actor ProgressTracker {
             snapshot.copiedBytes += item.expectedSize
         }
         snapshot.estimatedRemainingCount = max(0, snapshot.totalDiscovered - snapshot.totalCopied - snapshot.totalFailed)
+        noteProgress()
         recalculateRates()
         try await publish(force: false)
     }
@@ -168,6 +186,7 @@ actor ProgressTracker {
         snapshot.totalCopied = max(0, snapshot.totalCopied - itemCount)
         snapshot.copiedBytes = max(0, snapshot.copiedBytes - bytes)
         snapshot.estimatedRemainingCount = max(0, snapshot.totalDiscovered - snapshot.totalCopied - snapshot.totalFailed)
+        noteProgress()
         recalculateRates()
         try await publish(force: true)
     }
@@ -178,6 +197,7 @@ actor ProgressTracker {
            let startedAt = snapshot.startedAt {
             snapshot.hydrationMetrics.timeToFirstVerifiedChunkSeconds = Date().timeIntervalSince(startedAt)
         }
+        noteProgress()
         recalculateRates()
         try await publish(force: true)
     }
@@ -187,6 +207,7 @@ actor ProgressTracker {
         snapshot.lastError = failure.message
         snapshot.totalFailed += 1
         snapshot.estimatedRemainingCount = max(0, snapshot.totalDiscovered - snapshot.totalCopied - snapshot.totalFailed)
+        noteProgress()
         recalculateRates()
         try await publish(force: true)
     }
@@ -201,6 +222,7 @@ actor ProgressTracker {
         snapshot.lastError = lastError
         snapshot.estimatedRemainingCount = 0
         snapshot.estimatedRemainingSeconds = 0
+        noteProgress()
         recalculateRates()
         try await publish(force: true)
     }
@@ -212,6 +234,7 @@ actor ProgressTracker {
         snapshot.activeWorkerCount = 0
         snapshot.finishedAt = Date()
         snapshot.lastError = message
+        noteProgress()
         recalculateRates()
         try await publish(force: true)
     }
@@ -223,8 +246,26 @@ actor ProgressTracker {
         snapshot.activeWorkerCount = 0
         snapshot.finishedAt = Date()
         snapshot.lastError = message
+        noteProgress()
         recalculateRates()
         try await publish(force: true)
+    }
+
+    func runHealthSnapshot(now: Date) -> ProgressHealthSnapshot? {
+        guard let health = RunHealthState.evaluate(
+            isRunning: isActivelyRunning,
+            lastProgressAt: lastProgressAt,
+            now: now
+        ) else {
+            return nil
+        }
+
+        return ProgressHealthSnapshot(
+            health: health,
+            phase: snapshot.phase,
+            detail: snapshot.phaseDetail,
+            path: snapshot.currentPath
+        )
     }
 
     private func publish(force: Bool) async throws {
@@ -299,5 +340,18 @@ actor ProgressTracker {
         case .idle:
             return snapshot.phase
         }
+    }
+
+    private var isActivelyRunning: Bool {
+        switch snapshot.phase {
+        case .idle, .completed, .completedWithWarnings, .failed, .cancelled:
+            return false
+        default:
+            return snapshot.finishedAt == nil
+        }
+    }
+
+    private func noteProgress(at date: Date = Date()) {
+        lastProgressAt = date
     }
 }

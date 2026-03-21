@@ -227,19 +227,11 @@ struct PreflightEngine {
                 state: .warning
             )
         case .codingProject:
-            if transferPolicy.customExcludedDirectoryNames.contains(".git") {
-                return PreflightCheck(
-                    id: "scan-risk-git",
-                    title: "Git history is excluded for this run",
-                    detail: "Custom directory exclusions already skip `.git`, so discovery should avoid the Git object store.",
-                    state: .passed
-                )
-            }
             return PreflightCheck(
                 id: "scan-risk-git",
-                title: "Git history may dominate scan time",
-                detail: "This source contains `.git/objects`, and Coding Project mode still includes Git history unless you explicitly exclude `.git` in the custom directory list.",
-                state: .warning
+                title: "Git history is excluded for this run",
+                detail: "Coding Project mode now skips `.git` by default, so discovery should avoid the Git object store unless you switch back to Exact Copy.",
+                state: .passed
             )
         }
     }

@@ -609,7 +609,7 @@ struct MainView: View {
         case .preflight:
             return "The run is blocked in preflight until all required checks are confirmed."
         case .discovering:
-            return "Discovery is still walking the source tree. Large `.git` object stores or cloud-only top-level folders can delay the first copy."
+            return "Discovery is still walking the source tree. Exact Copy, cloud-only top-level folders, or unusually large temporary/build trees can delay the first copy."
         case .planningChunks:
             return "Chunk planning now happens per discovered subtree. ETA becomes useful once copy work starts."
         default:

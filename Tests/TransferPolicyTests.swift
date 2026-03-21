@@ -11,6 +11,9 @@ final class TransferPolicyTests: XCTestCase {
 
         XCTAssertEqual(policy.scanDecision(relativePath: ".venv", kind: .directory), .excludeDescendants(reason: "Excluded generated directory .venv"))
         XCTAssertEqual(policy.scanDecision(relativePath: "node_modules", kind: .directory), .excludeDescendants(reason: "Excluded generated directory node_modules"))
+        XCTAssertEqual(policy.scanDecision(relativePath: ".git", kind: .directory), .excludeDescendants(reason: "Excluded generated directory .git"))
+        XCTAssertEqual(policy.scanDecision(relativePath: ".tmp", kind: .directory), .excludeDescendants(reason: "Excluded generated directory .tmp"))
+        XCTAssertEqual(policy.scanDecision(relativePath: ".build", kind: .directory), .excludeDescendants(reason: "Excluded generated directory .build"))
         XCTAssertEqual(policy.scanDecision(relativePath: "cache/data.sqlite", kind: .file), .excludeItem(reason: "Excluded file extension .sqlite"))
         XCTAssertEqual(policy.scanDecision(relativePath: "Sources/App/main.swift", kind: .file), .include)
         XCTAssertTrue(policy.ignoredCustomRules.contains("Ignored custom directory exclusion: src"))
@@ -35,6 +38,14 @@ final class TransferPolicyTests: XCTestCase {
         try fileManager.createDirectory(at: nodeModulesDir, withIntermediateDirectories: true)
         try Data("react".utf8).write(to: nodeModulesDir.appendingPathComponent("index.js"))
 
+        let gitObjectsDir = root.appendingPathComponent(".git/objects/ab", isDirectory: true)
+        try fileManager.createDirectory(at: gitObjectsDir, withIntermediateDirectories: true)
+        try Data("object".utf8).write(to: gitObjectsDir.appendingPathComponent("123456"))
+
+        let tempDir = root.appendingPathComponent(".tmp/cache", isDirectory: true)
+        try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try Data("tmp".utf8).write(to: tempDir.appendingPathComponent("artifact.txt"))
+
         let policy = TransferPolicy(mode: .codingProject)
         let engine = ScanEngine()
 
@@ -43,16 +54,10 @@ final class TransferPolicyTests: XCTestCase {
         XCTAssertEqual(items.map(\.relativePath), ["Sources", "Sources/main.swift"])
     }
 
-    func testCodingProjectModeAllowsExplicitGitExclusion() {
-        let policy = TransferPolicy(
-            mode: .codingProject,
-            customExcludedDirectoryNames: [".git"]
-        )
+    func testCodingProjectModeStillAllowsExplicitGitExclusionWithoutIgnoringIt() {
+        let policy = TransferPolicy(mode: .codingProject, customExcludedDirectoryNames: [".git"])
 
-        XCTAssertEqual(
-            policy.scanDecision(relativePath: ".git", kind: .directory),
-            .excludeDescendants(reason: "Excluded generated directory .git")
-        )
+        XCTAssertEqual(policy.scanDecision(relativePath: ".git", kind: .directory), .excludeDescendants(reason: "Excluded generated directory .git"))
         XCTAssertFalse(policy.ignoredCustomRules.contains(where: { $0.contains(".git") }))
     }
 

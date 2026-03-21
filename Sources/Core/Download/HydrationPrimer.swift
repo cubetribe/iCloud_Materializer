@@ -10,12 +10,14 @@ struct HydrationPrimingReport: Sendable, Equatable {
     var readPressureDirectoryCount: Int = 0
     var readPressureFileCount: Int = 0
     var readPressureFailureCount: Int = 0
+    var readPressureTimeoutCount: Int = 0
 
     var didWork: Bool {
         requestedCount > 0 ||
         readPressureDirectoryCount > 0 ||
         readPressureFileCount > 0 ||
-        readPressureFailureCount > 0
+        readPressureFailureCount > 0 ||
+        readPressureTimeoutCount > 0
     }
 }
 
@@ -24,6 +26,7 @@ struct HydrationPrimer: Sendable {
         var directoryCount: Int = 0
         var fileCount: Int = 0
         var failureCount: Int = 0
+        var timeoutCount: Int = 0
     }
 
     static func primeProject(
@@ -34,7 +37,10 @@ struct HydrationPrimer: Sendable {
         readPressureConcurrency: Int,
         pauseController: PauseController? = nil
     ) async throws -> HydrationPrimingReport {
-        let childLimit = BatchCoordinator.prefetchCandidateLimit(scanDepth: scanDepth)
+        let childLimit = recommendedCandidateLimit(
+            scanDepth: scanDepth,
+            hydrationMode: hydrationMode
+        )
         let urls = BatchCoordinator.prefetchCandidateURLs(
             projectURL: projectURL,
             transferPolicy: transferPolicy,
@@ -58,12 +64,14 @@ struct HydrationPrimer: Sendable {
         candidates: [HydrationPrimingCandidate],
         hydrationMode: HydrationMode,
         readPressureConcurrency: Int,
+        readPressureProbeTimeout: Duration? = nil,
         pauseController: PauseController? = nil
     ) async throws -> HydrationPrimingReport {
         let uniqueCandidates = uniqued(candidates)
         guard !uniqueCandidates.isEmpty else { return HydrationPrimingReport() }
 
         var report = HydrationPrimingReport()
+        let probeTimeout = readPressureProbeTimeout ?? defaultReadPressureProbeTimeout(for: hydrationMode)
 
         if hydrationMode.usesAPIRequests {
             report.requestedCount = try await requestDownloads(
@@ -76,11 +84,13 @@ struct HydrationPrimer: Sendable {
             let probeReport = try await applyReadPressure(
                 to: uniqueCandidates,
                 concurrency: readPressureConcurrency,
+                probeTimeout: probeTimeout,
                 pauseController: pauseController
             )
             report.readPressureDirectoryCount = probeReport.directoryCount
             report.readPressureFileCount = probeReport.fileCount
             report.readPressureFailureCount = probeReport.failureCount
+            report.readPressureTimeoutCount = probeReport.timeoutCount
         }
 
         return report
@@ -113,6 +123,7 @@ struct HydrationPrimer: Sendable {
     private static func applyReadPressure(
         to candidates: [HydrationPrimingCandidate],
         concurrency: Int,
+        probeTimeout: Duration,
         pauseController: PauseController?
     ) async throws -> ProbeOutcome {
         guard !candidates.isEmpty else { return ProbeOutcome() }
@@ -125,7 +136,7 @@ struct HydrationPrimer: Sendable {
                 guard let candidate = iterator.next() else { break }
                 group.addTask {
                     try await checkpoint(pauseController)
-                    return probe(candidate)
+                    return await probe(candidate, timeout: probeTimeout)
                 }
             }
 
@@ -133,11 +144,12 @@ struct HydrationPrimer: Sendable {
                 aggregate.directoryCount += outcome.directoryCount
                 aggregate.fileCount += outcome.fileCount
                 aggregate.failureCount += outcome.failureCount
+                aggregate.timeoutCount += outcome.timeoutCount
 
                 guard let candidate = iterator.next() else { continue }
                 group.addTask {
                     try await checkpoint(pauseController)
-                    return probe(candidate)
+                    return await probe(candidate, timeout: probeTimeout)
                 }
             }
         }
@@ -145,7 +157,36 @@ struct HydrationPrimer: Sendable {
         return aggregate
     }
 
-    private static func probe(_ candidate: HydrationPrimingCandidate) -> ProbeOutcome {
+    private static func probe(
+        _ candidate: HydrationPrimingCandidate,
+        timeout: Duration
+    ) async -> ProbeOutcome {
+        let sanitizedTimeout = max(timeout.timeInterval, 0.05)
+        let probeTask = Task.detached(priority: .utility) {
+            probeSynchronously(candidate)
+        }
+
+        return await withTaskGroup(of: ProbeOutcome.self) { group in
+            group.addTask {
+                await probeTask.value
+            }
+            group.addTask {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(sanitizedTimeout * 1_000_000_000))
+                } catch {
+                    return ProbeOutcome()
+                }
+                probeTask.cancel()
+                return ProbeOutcome(timeoutCount: 1)
+            }
+
+            let outcome = await group.next() ?? ProbeOutcome()
+            group.cancelAll()
+            return outcome
+        }
+    }
+
+    private static func probeSynchronously(_ candidate: HydrationPrimingCandidate) -> ProbeOutcome {
         let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey]
         let isDirectory = (try? candidate.url.resourceValues(forKeys: resourceKeys))?.isDirectory == true
 
@@ -201,5 +242,25 @@ struct HydrationPrimer: Sendable {
             return rootURL.lastPathComponent
         }
         return candidatePath.replacingOccurrences(of: "\(rootPath)/", with: "")
+    }
+
+    private static func recommendedCandidateLimit(
+        scanDepth: Int,
+        hydrationMode: HydrationMode
+    ) -> Int {
+        let baseLimit = BatchCoordinator.prefetchCandidateLimit(scanDepth: scanDepth)
+        let ceiling = hydrationMode.usesReadPressure ? 48 : 128
+        return min(baseLimit, ceiling)
+    }
+
+    private static func defaultReadPressureProbeTimeout(for hydrationMode: HydrationMode) -> Duration {
+        switch hydrationMode {
+        case .apiOnly:
+            return .milliseconds(250)
+        case .hybridReadPressure:
+            return .milliseconds(400)
+        case .readPressureOnly:
+            return .milliseconds(600)
+        }
     }
 }

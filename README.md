@@ -51,9 +51,9 @@ Implemented today:
 - shallow-first discovery, hydration, staged copy, verification, and promotion
 - aggressive rescue warmup that can request hydration across multiple top-level directories in parallel
 - selectable hydration modes: API only, hybrid API plus read pressure, and read-pressure-only
-- queued read-pressure probes that touch directories and small file reads before the copy workers need the data
+- budgeted read-pressure probes that touch directories and small file reads before the copy workers need the data, without letting one hidden tree monopolize warmup
 - parallel prewarm of multiple upcoming batch projects so the next rescue candidates are already nudged before the current project finishes
-- live telemetry, logs, failures, stall warnings, and hydration-state timing
+- live telemetry, persistent logs, no-progress health warnings, failures, and hydration-state timing
 - transfer scope presets for exact copies vs. coding-project copies
 - priority presets for critical files first
 - batch resume state and deletion manifests for later manual review
@@ -110,7 +110,7 @@ Preflight currently covers:
 - destination outside likely iCloud Drive paths
 - destination free-space thresholds
 - top-level source availability to catch cloud-only folders early
-- a scan-risk warning for `.git/objects`
+- a `.git/objects` scan-risk/status check
 - manual confirmations for `Sync this Mac`, Finder `Keep Downloaded`, permissions, and competing sync tools
 
 ## Safety Model
@@ -193,10 +193,12 @@ Always excluded anyway:
 Built-in exclusions include:
 - Python virtual environments and caches such as `.venv`, `venv`, `env`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox`
 - JavaScript dependency and build directories such as `node_modules`, `.pnpm-store`, `.parcel-cache`, `.next`, `.nuxt`, `.svelte-kit`, `.turbo`
-- generated build/tooling directories such as `.gradle`, `.dart_tool`, `DerivedData`
+- generated build/tooling directories such as `.gradle`, `.dart_tool`, `.build`, `.swiftpm`, `.cache`, `DerivedData`
+- repository metadata and temporary workspaces such as `.git`, `.tmp`, and `tmp`
 - generated files such as `.DS_Store`, `Thumbs.db`, `.pyc`, `.pyo`
 
 Custom directory-name and file-extension exclusions are supported, but the app still blocks risky custom rules that would exclude core source paths such as `src`, `tests`, or common source file extensions. `.git` is the one notable exception now, because explicitly skipping Git object history can be the right tradeoff for a rescue run when discovery time dominates.
+Custom directory-name and file-extension exclusions are supported, but the app still blocks risky custom rules that would exclude core source paths such as `src`, `tests`, or common source file extensions. Repository metadata like `.git` is already excluded in `Coding Project` mode, so you no longer need a special custom rule just to keep Git object history out of the rescue path.
 
 ## Copy Priority
 

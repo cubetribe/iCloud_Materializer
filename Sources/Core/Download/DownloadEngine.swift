@@ -299,9 +299,10 @@ struct DownloadEngine: Sendable {
         primedPaths: inout Set<String>
     ) async throws {
         guard configuration.readPressureConcurrency > 0 else { return }
+        let readPressurePrefetchBudget = max(configuration.readPressureConcurrency * 4, 8)
 
         let candidates = hotQueue
-            .prefix(configuration.localPrefetchScanDepth)
+            .prefix(min(configuration.localPrefetchScanDepth, readPressurePrefetchBudget))
             .filter { primedPaths.contains($0.item.relativePath) == false }
             .map { pending in
                 HydrationPrimingCandidate(

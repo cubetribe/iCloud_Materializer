@@ -44,6 +44,17 @@ final class MaterializerCoordinator: @unchecked Sendable {
             store: store,
             onUpdate: onUpdate
         )
+        let healthMonitor = Task { [self] in
+            await monitorRunHealth(
+                tracker: tracker,
+                configuration: configuration,
+                store: store,
+                onUpdate: onUpdate
+            )
+        }
+        defer {
+            healthMonitor.cancel()
+        }
         var failures: [FailureRecord] = []
 
         do {
@@ -1097,20 +1108,10 @@ final class MaterializerCoordinator: @unchecked Sendable {
         try await pauseController.checkpoint()
 
         let directoryURL = configuration.sourceURL.appendingPathComponent(directory.relativePath, isDirectory: true)
-        let candidateLimit = BatchCoordinator.prefetchCandidateLimit(scanDepth: configuration.localPrefetchScanDepth)
-        let candidates = BatchCoordinator.prefetchCandidateURLs(
+        let report = try await HydrationPrimer.primeProject(
             projectURL: directoryURL,
             transferPolicy: configuration.transferPolicy,
-            childLimit: candidateLimit
-        ).map { candidate in
-            HydrationPrimingCandidate(
-                url: candidate,
-                relativePath: normalizedRelativePath(for: candidate, rootURL: configuration.sourceURL)
-            )
-        }
-
-        let report = try await HydrationPrimer.prime(
-            candidates: candidates,
+            scanDepth: configuration.localPrefetchScanDepth,
             hydrationMode: configuration.hydrationMode,
             readPressureConcurrency: configuration.readPressureConcurrency,
             pauseController: pauseController
@@ -1121,7 +1122,8 @@ final class MaterializerCoordinator: @unchecked Sendable {
             report.requestedCount > 0 ? "\(report.requestedCount) API request(s)" : nil,
             report.readPressureDirectoryCount > 0 ? "\(report.readPressureDirectoryCount) directory probe(s)" : nil,
             report.readPressureFileCount > 0 ? "\(report.readPressureFileCount) file probe(s)" : nil,
-            report.readPressureFailureCount > 0 ? "\(report.readPressureFailureCount) probe failure(s)" : nil
+            report.readPressureFailureCount > 0 ? "\(report.readPressureFailureCount) probe failure(s)" : nil,
+            report.readPressureTimeoutCount > 0 ? "\(report.readPressureTimeoutCount) probe timeout(s)" : nil
         ]
             .compactMap { $0 }
             .joined(separator: ", ")
@@ -1187,6 +1189,76 @@ final class MaterializerCoordinator: @unchecked Sendable {
         case .missingFolderSelection, .invalidDestination, .invalidBatchSource, .persistenceFailed:
             return .persistence
         }
+    }
+
+    private func monitorRunHealth(
+        tracker: ProgressTracker,
+        configuration: JobConfiguration,
+        store: JobStore,
+        onUpdate: @escaping @Sendable (JobUpdate) async -> Void
+    ) async {
+        var lastLoggedLevel: RunHealthLevel?
+
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch {
+                return
+            }
+
+            guard let snapshot = await tracker.runHealthSnapshot(now: Date()) else {
+                lastLoggedLevel = nil
+                continue
+            }
+
+            switch snapshot.health.level {
+            case .active:
+                if lastLoggedLevel == .watch || lastLoggedLevel == .stalled {
+                    await log(
+                        .info,
+                        "Progress resumed. \(healthContext(for: snapshot))",
+                        jobID: configuration.jobID,
+                        store: store,
+                        onUpdate: onUpdate,
+                        path: snapshot.path
+                    )
+                }
+                lastLoggedLevel = .active
+            case .watch:
+                guard lastLoggedLevel != .watch && lastLoggedLevel != .stalled else { continue }
+                await log(
+                    .warning,
+                    "\(snapshot.health.message) \(healthContext(for: snapshot))",
+                    jobID: configuration.jobID,
+                    store: store,
+                    onUpdate: onUpdate,
+                    path: snapshot.path
+                )
+                lastLoggedLevel = .watch
+            case .stalled:
+                guard lastLoggedLevel != .stalled else { continue }
+                await log(
+                    .error,
+                    "\(snapshot.health.message) \(healthContext(for: snapshot))",
+                    jobID: configuration.jobID,
+                    store: store,
+                    onUpdate: onUpdate,
+                    path: snapshot.path
+                )
+                lastLoggedLevel = .stalled
+            }
+        }
+    }
+
+    private func healthContext(for snapshot: ProgressHealthSnapshot) -> String {
+        var segments = ["Current phase: \(snapshot.phase.rawValue)"]
+        if let detail = snapshot.detail, !detail.isEmpty {
+            segments.append("detail: \(detail)")
+        }
+        if let path = snapshot.path, !path.isEmpty {
+            segments.append("path: \(path)")
+        }
+        return segments.joined(separator: " | ")
     }
 
     private func normalizedRelativePath(for url: URL, rootURL: URL) -> String {

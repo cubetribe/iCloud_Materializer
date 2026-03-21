@@ -31,7 +31,7 @@ final class PreflightEngineTests: XCTestCase {
         )
     }
 
-    func testEvaluateFlagsGitScanRiskUntilGitIsExplicitlyExcluded() throws {
+    func testEvaluateMarksGitScanRiskAsResolvedForCodingProjectMode() throws {
         let fileManager = FileManager.default
         let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let sourceRoot = workspace.appendingPathComponent("Source", isDirectory: true)
@@ -42,22 +42,22 @@ final class PreflightEngineTests: XCTestCase {
         try fileManager.createDirectory(at: gitObjects, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
 
-        let warningReport = PreflightEngine().evaluate(
+        let exactCopyReport = PreflightEngine().evaluate(
+            sourceURL: sourceRoot,
+            destinationURL: destinationRoot,
+            transferPolicy: .exactCopy,
+            confirmations: []
+        )
+        let exactCopyCheck = try XCTUnwrap(exactCopyReport.checks.first(where: { $0.id == "scan-risk-git" }))
+        XCTAssertEqual(exactCopyCheck.state, .warning)
+
+        let codingProjectReport = PreflightEngine().evaluate(
             sourceURL: sourceRoot,
             destinationURL: destinationRoot,
             transferPolicy: TransferPolicy(mode: .codingProject),
             confirmations: []
         )
-        let warningCheck = try XCTUnwrap(warningReport.checks.first(where: { $0.id == "scan-risk-git" }))
-        XCTAssertEqual(warningCheck.state, .warning)
-
-        let excludedReport = PreflightEngine().evaluate(
-            sourceURL: sourceRoot,
-            destinationURL: destinationRoot,
-            transferPolicy: TransferPolicy(mode: .codingProject, customExcludedDirectoryNames: [".git"]),
-            confirmations: []
-        )
-        let excludedCheck = try XCTUnwrap(excludedReport.checks.first(where: { $0.id == "scan-risk-git" }))
-        XCTAssertEqual(excludedCheck.state, .passed)
+        let codingProjectCheck = try XCTUnwrap(codingProjectReport.checks.first(where: { $0.id == "scan-risk-git" }))
+        XCTAssertEqual(codingProjectCheck.state, .passed)
     }
 }

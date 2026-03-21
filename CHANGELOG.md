@@ -43,11 +43,12 @@ This repository does not use automated releases yet. Until the first tagged rele
 - README now explains the root cause of low apparent utilization in large iCloud rescues and positions the app explicitly as a rescue/orchestration layer around Apple's File Provider behavior.
 - Rescue runs now begin with `preflight -> shallow discovery -> hydration -> copy/verify/promote` instead of waiting for a whole-tree scan and chunk plan before the first useful copy work.
 - Automatic ZIP creation is now disabled in the default rescue path so success means a verified local copy first; archive creation is deferred to a later manual step.
-- Coding Project mode now allows an explicit custom `.git` exclusion so Git object stores can be skipped when scan time dominates rescue progress.
+- Coding Project mode now skips repository metadata and temporary build workspaces by default, including `.git`, `.tmp`, `.build`, `.swiftpm`, and `.cache`, so rescue runs stop burning time on low-value trees.
 - Rescue-mode batch previews no longer keep advertising deletion readiness when archive creation is disabled.
 - Aggressive single-project runs now request iCloud warmup across multiple top-level directories in parallel before subtree processing starts, so the app can pressure more than one cold folder tree at a time.
 - Hybrid and read-pressure rescue runs now create real IO pressure ahead of copy work by touching directory listings and small file reads in parallel, which better matches the Finder behavior that often triggers iCloud sync sooner.
 - Batch prewarm can now fan out across multiple upcoming projects in parallel instead of warming future project roots strictly one by one.
+- Read-pressure warmup is now breadth-limited per directory and per hot queue, so aggressive rescue spreads pressure across more projects instead of drilling hundreds of probe reads into one tree.
 
 ### Fixed
 - Restored and re-validated the batch queue implementation after workspace recovery.
@@ -61,3 +62,4 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Fixed pause and cancel handling during long-running discovery, verification, and rescue prewarm phases so the UI controls now interrupt active runs instead of waiting for a later copy-stage checkpoint.
 - Added a bounded top-level warmup scheduler for aggressive rescue runs so single-project jobs are no longer limited to requesting iCloud hydration for only one root directory at a time.
 - Added a dedicated read-pressure priming layer so the rescue path is no longer limited to the control-plane `startDownloadingUbiquitousItem` signal when Apple's File Provider only reacts to actual IO.
+- Added timeout-bounded read-pressure probes and recurring no-progress health logs so long rescue runs no longer disappear into a silent half-hour stall without new diagnostics.
