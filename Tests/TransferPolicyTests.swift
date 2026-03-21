@@ -14,6 +14,10 @@ final class TransferPolicyTests: XCTestCase {
         XCTAssertEqual(policy.scanDecision(relativePath: ".git", kind: .directory), .excludeDescendants(reason: "Excluded generated directory .git"))
         XCTAssertEqual(policy.scanDecision(relativePath: ".tmp", kind: .directory), .excludeDescendants(reason: "Excluded generated directory .tmp"))
         XCTAssertEqual(policy.scanDecision(relativePath: ".build", kind: .directory), .excludeDescendants(reason: "Excluded generated directory .build"))
+        XCTAssertEqual(policy.scanDecision(relativePath: "build", kind: .directory), .excludeDescendants(reason: "Excluded generated directory build"))
+        XCTAssertEqual(policy.scanDecision(relativePath: ".idea", kind: .directory), .excludeDescendants(reason: "Excluded generated directory .idea"))
+        XCTAssertEqual(policy.scanDecision(relativePath: ".vscode", kind: .directory), .excludeDescendants(reason: "Excluded generated directory .vscode"))
+        XCTAssertEqual(policy.scanDecision(relativePath: "Pods", kind: .directory), .excludeDescendants(reason: "Excluded generated directory pods"))
         XCTAssertEqual(policy.scanDecision(relativePath: "cache/data.sqlite", kind: .file), .excludeItem(reason: "Excluded file extension .sqlite"))
         XCTAssertEqual(policy.scanDecision(relativePath: "Sources/App/main.swift", kind: .file), .include)
         XCTAssertTrue(policy.ignoredCustomRules.contains("Ignored custom directory exclusion: src"))
@@ -45,6 +49,18 @@ final class TransferPolicyTests: XCTestCase {
         let tempDir = root.appendingPathComponent(".tmp/cache", isDirectory: true)
         try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
         try Data("tmp".utf8).write(to: tempDir.appendingPathComponent("artifact.txt"))
+
+        let buildDir = root.appendingPathComponent("build/ios", isDirectory: true)
+        try fileManager.createDirectory(at: buildDir, withIntermediateDirectories: true)
+        try Data("archive".utf8).write(to: buildDir.appendingPathComponent("app.xcarchive"))
+
+        let ideaDir = root.appendingPathComponent(".idea/runConfigurations", isDirectory: true)
+        try fileManager.createDirectory(at: ideaDir, withIntermediateDirectories: true)
+        try Data("<config/>".utf8).write(to: ideaDir.appendingPathComponent("dev.xml"))
+
+        let podsDir = root.appendingPathComponent("Pods/Target Support Files", isDirectory: true)
+        try fileManager.createDirectory(at: podsDir, withIntermediateDirectories: true)
+        try Data("support".utf8).write(to: podsDir.appendingPathComponent("Pods.debug.xcconfig"))
 
         let policy = TransferPolicy(mode: .codingProject)
         let engine = ScanEngine()

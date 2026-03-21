@@ -4,16 +4,30 @@ import SQLite3
 actor JobStore {
     private let databaseURL: URL
     private var db: OpaquePointer?
+    private let fileManager: FileManager
 
-    init(databaseURL: URL) throws {
+    init(databaseURL: URL, fileManager: FileManager = .default) throws {
         self.databaseURL = databaseURL
-        try FileManager.default.createDirectory(
-            at: databaseURL.deletingLastPathComponent(),
+        self.fileManager = fileManager
+        let parentDirectoryURL = databaseURL.deletingLastPathComponent()
+        try fileManager.createDirectory(
+            at: parentDirectoryURL,
             withIntermediateDirectories: true
         )
-        if sqlite3_open(databaseURL.path, &db) != SQLITE_OK {
-            throw PipelineError.persistenceFailed("Unable to open SQLite database at \(databaseURL.path)")
+        var dbHandle: OpaquePointer?
+        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(databaseURL.path, &dbHandle, flags, nil) != SQLITE_OK {
+            let sqliteMessage = Self.lastErrorMessage(db: dbHandle)
+            if let dbHandle {
+                sqlite3_close(dbHandle)
+            }
+            let parentExists = fileManager.fileExists(atPath: parentDirectoryURL.path)
+            let parentWritable = fileManager.isWritableFile(atPath: parentDirectoryURL.path)
+            throw PipelineError.persistenceFailed(
+                "Unable to open SQLite database at \(databaseURL.path). Parent exists: \(parentExists). Parent writable: \(parentWritable). SQLite: \(sqliteMessage)"
+            )
         }
+        self.db = dbHandle
         try Self.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             job_id TEXT PRIMARY KEY,

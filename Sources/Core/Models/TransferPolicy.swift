@@ -103,7 +103,7 @@ struct TransferPolicy: Hashable, Sendable {
             TransferRuleDescriptor(
                 id: "tooling-caches",
                 title: "Tooling caches and generated build data",
-                detail: ".gradle, .dart_tool, .build, .swiftpm, .cache, DerivedData"
+                detail: ".gradle, .dart_tool, .build, build, .swiftpm, .cache, DerivedData, .idea, .vscode, Pods, dist, coverage"
             ),
             TransferRuleDescriptor(
                 id: "repo-metadata",
@@ -286,8 +286,14 @@ struct TransferPolicy: Hashable, Sendable {
         ".gradle",
         ".dart_tool",
         ".build",
+        "build",
         ".swiftpm",
         ".cache",
+        ".idea",
+        ".vscode",
+        "pods",
+        "dist",
+        "coverage",
         ".git",
         ".tmp",
         "tmp",

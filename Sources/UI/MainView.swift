@@ -4,13 +4,12 @@ struct MainView: View {
     @State private var viewModel = MainViewModel()
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                header
-                mainContent
-            }
-            .padding(20)
+        VStack(alignment: .leading, spacing: 16) {
+            header
+            mainContent
         }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .frame(minWidth: 1280, minHeight: 920)
         .onChange(of: viewModel.runMode, initial: true) { _, _ in
             viewModel.rebuildBatchPreview()
@@ -93,7 +92,12 @@ struct MainView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            rightRail
+            ScrollView {
+                rightRail
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(width: 376)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
     }
 
@@ -478,9 +482,15 @@ struct MainView: View {
                         Text("No failures recorded.")
                             .foregroundStyle(.secondary)
                     } else {
+                        if hiddenFailureCount > 0 {
+                            Text("Showing the latest \(visibleFailures.count) failures to keep the live UI responsive.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 10) {
-                                ForEach(viewModel.failures) { failure in
+                                ForEach(visibleFailures) { failure in
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(failure.relativePath)
                                             .font(.system(.body, design: .monospaced))
@@ -500,10 +510,16 @@ struct MainView: View {
             }
 
             GroupBox("Event Stream") {
-                ScrollViewReader { proxy in
+                VStack(alignment: .leading, spacing: 10) {
+                    if hiddenLogCount > 0 {
+                        Text("Showing the latest \(visibleLogEntries.count) log lines in the UI. The complete session continues to be written to the JSONL log file.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(viewModel.logs) { entry in
+                            ForEach(visibleLogEntries) { entry in
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("\(timestamp(entry.createdAt))  [\(entry.level.rawValue.uppercased())] \(entry.message)")
                                         .font(.system(.body, design: .monospaced))
@@ -514,15 +530,10 @@ struct MainView: View {
                                             .textSelection(.enabled)
                                     }
                                 }
-                                .id(entry.id)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .onChange(of: viewModel.logs.count, initial: false) { _, _ in
-                        guard let lastID = viewModel.logs.last?.id else { return }
-                        proxy.scrollTo(lastID, anchor: .bottom)
                     }
                 }
                 .frame(minHeight: 220)
@@ -806,7 +817,7 @@ struct MainView: View {
 
     private var visibleActivities: [WorkerActivity] {
         if !viewModel.activities.isEmpty {
-            return viewModel.activities
+            return Array(viewModel.activities.prefix(12))
         }
         guard viewModel.isRunning else { return [] }
         return [
@@ -819,6 +830,22 @@ struct MainView: View {
                 updatedAt: Date()
             )
         ]
+    }
+
+    private var visibleFailures: [FailureRecord] {
+        Array(viewModel.failures.suffix(80))
+    }
+
+    private var hiddenFailureCount: Int {
+        max(0, viewModel.failures.count - visibleFailures.count)
+    }
+
+    private var visibleLogEntries: [LogEntry] {
+        Array(viewModel.logs.suffix(120))
+    }
+
+    private var hiddenLogCount: Int {
+        max(0, viewModel.logs.count - visibleLogEntries.count)
     }
 
     private var itemProgress: Double {

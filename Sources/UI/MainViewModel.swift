@@ -6,6 +6,7 @@ import Observation
 @Observable
 final class MainViewModel {
     private static let maxLogEntries = 250
+    private static let maxFailureEntries = 120
     private static let maxVisibleBatchProjects = 40
     private static let batchProjectLeadCount = 6
     private static let batchProjectContextRadius = 6
@@ -555,10 +556,15 @@ final class MainViewModel {
                 logs.removeFirst(logs.count - Self.maxLogEntries)
             }
         case .failures(let failures):
-            if !failures.isEmpty {
-                lastProgressAt = failures.last?.createdAt ?? Date()
+            let sortedFailures = failures.sorted { $0.createdAt < $1.createdAt }
+            if !sortedFailures.isEmpty {
+                lastProgressAt = sortedFailures.last?.createdAt ?? Date()
             }
-            self.failures = failures.sorted { $0.createdAt < $1.createdAt }
+            if sortedFailures.count > Self.maxFailureEntries {
+                self.failures = Array(sortedFailures.suffix(Self.maxFailureEntries))
+            } else {
+                self.failures = sortedFailures
+            }
         case .activities(let activities):
             if activities != self.activities {
                 lastProgressAt = Date()
@@ -693,7 +699,7 @@ private actor ViewUpdateRelay {
     private var flushTask: Task<Void, Never>?
 
     init(
-        flushInterval: Duration = .milliseconds(200),
+        flushInterval: Duration = .milliseconds(350),
         apply: @escaping @Sendable (BufferedJobUpdates) async -> Void
     ) {
         self.flushInterval = flushInterval

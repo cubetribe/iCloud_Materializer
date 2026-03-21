@@ -32,6 +32,7 @@ This repository does not use automated releases yet. Until the first tagged rele
 - The UI now shows the active session log path and can reveal the current log file or open the log folder directly.
 - Large batch runs now coalesce UI updates before they reach SwiftUI, so the rescue pipeline is no longer forced to wait on every main-thread redraw.
 - The live batch queue now renders a focused project window for very large queues, and the log/failure panes use lighter-weight scrolling behavior to keep monitoring responsive during long runs.
+- The live monitoring UI no longer nests the whole window inside another top-level scroll container, keeps only bounded failure/log windows on screen, and avoids automatic log autoscroll so long rescue runs stop spending main-thread time on layout churn instead of rescue work.
 - Final completion now depends on verifying the visible promoted target, not only the internal assembled tree.
 - Batch ZIP archives are written to `<source root>/_Materializer_Archives/` instead of being mixed into each source project directory.
 - The UI now exposes stalled-run health signals to make long iCloud operations easier to monitor.
@@ -44,6 +45,7 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Rescue runs now begin with `preflight -> shallow discovery -> hydration -> copy/verify/promote` instead of waiting for a whole-tree scan and chunk plan before the first useful copy work.
 - Automatic ZIP creation is now disabled in the default rescue path so success means a verified local copy first; archive creation is deferred to a later manual step.
 - Coding Project mode now skips repository metadata and temporary build workspaces by default, including `.git`, `.tmp`, `.build`, `.swiftpm`, and `.cache`, so rescue runs stop burning time on low-value trees.
+- Coding Project mode now also skips `build`, `.idea`, `.vscode`, `Pods`, `dist`, and `coverage`, matching the heavy generated trees that showed up in recent stalled rescue runs.
 - Rescue-mode batch previews no longer keep advertising deletion readiness when archive creation is disabled.
 - Aggressive single-project runs now request iCloud warmup across multiple top-level directories in parallel before subtree processing starts, so the app can pressure more than one cold folder tree at a time.
 - Hybrid and read-pressure rescue runs now create real IO pressure ahead of copy work by touching directory listings and small file reads in parallel, which better matches the Finder behavior that often triggers iCloud sync sooner.
@@ -63,3 +65,5 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Added a bounded top-level warmup scheduler for aggressive rescue runs so single-project jobs are no longer limited to requesting iCloud hydration for only one root directory at a time.
 - Added a dedicated read-pressure priming layer so the rescue path is no longer limited to the control-plane `startDownloadingUbiquitousItem` signal when Apple's File Provider only reacts to actual IO.
 - Added timeout-bounded read-pressure probes and recurring no-progress health logs so long rescue runs no longer disappear into a silent half-hour stall without new diagnostics.
+- Fixed a nested-chunk verification bug where intermediate directories such as `apps` or `apps/mobile` could be reported as unexpected items even though they were only scaffolding created while assembling a deeper subtree copy.
+- Improved SQLite open diagnostics for batch job state so a persistence failure now logs the exact runtime database path together with parent-directory availability and writability instead of only surfacing the generic SQLite error string.

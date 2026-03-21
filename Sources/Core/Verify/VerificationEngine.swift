@@ -12,6 +12,7 @@ struct VerificationEngine: Sendable {
         let fileManager = FileManager.default
         let expectedMap = Dictionary(uniqueKeysWithValues: expectedItems.map { ($0.relativePath, $0) })
         let actualMap = try await buildActualInventory(root: root, fileManager: fileManager, pauseController: pauseController)
+        let allowedAncestorDirectories = ancestorScaffoldDirectories(for: expectedItems)
         var mismatches: [String] = []
         var verifiedBytes: Int64 = 0
 
@@ -47,7 +48,16 @@ struct VerificationEngine: Sendable {
             }
         }
 
-        let extras = actualMap.keys.filter { expectedMap[$0] == nil && !shouldIgnoreExtra(path: $0) }
+        let extras = actualMap.keys.filter { path in
+            guard expectedMap[path] == nil, let actualItem = actualMap[path] else {
+                return false
+            }
+            return !shouldIgnoreExtra(
+                path: path,
+                actualItem: actualItem,
+                allowedAncestorDirectories: allowedAncestorDirectories
+            )
+        }
         extras.forEach { mismatches.append("Unexpected item: \($0)") }
 
         if !mismatches.isEmpty {
@@ -107,9 +117,35 @@ struct VerificationEngine: Sendable {
         return String(itemPath[startIndex...]).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
-    private func shouldIgnoreExtra(path: String) -> Bool {
+    private func shouldIgnoreExtra(
+        path: String,
+        actualItem: ScannedItem,
+        allowedAncestorDirectories: Set<String>
+    ) -> Bool {
         let lastComponent = URL(fileURLWithPath: path).lastPathComponent
-        return lastComponent == ".DS_Store" || lastComponent.hasPrefix("._")
+        if lastComponent == ".DS_Store" || lastComponent.hasPrefix("._") {
+            return true
+        }
+
+        return actualItem.kind == .directory && allowedAncestorDirectories.contains(path)
+    }
+
+    private func ancestorScaffoldDirectories(for expectedItems: [ScannedItem]) -> Set<String> {
+        var ancestors: Set<String> = []
+
+        for item in expectedItems {
+            let components = item.relativePath.split(separator: "/").map(String.init)
+            guard components.count > 1 else { continue }
+
+            for index in 1..<components.count {
+                let ancestor = components.prefix(index).joined(separator: "/")
+                if ancestor != item.relativePath {
+                    ancestors.insert(ancestor)
+                }
+            }
+        }
+
+        return ancestors
     }
 
     private func checkpoint(_ pauseController: PauseController?) async throws {

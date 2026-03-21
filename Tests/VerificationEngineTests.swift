@@ -78,6 +78,53 @@ final class VerificationEngineTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(recordedCount, 4)
         XCTAssertLessThan(recordedCount, items.count)
     }
+
+    func testVerificationIgnoresAncestorScaffoldingDirectoriesForNestedChunkCopies() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let nestedDirectory = root.appendingPathComponent("apps/mobile/lib", isDirectory: true)
+        try fileManager.createDirectory(at: nestedDirectory, withIntermediateDirectories: true)
+        let fileURL = nestedDirectory.appendingPathComponent("main.dart", isDirectory: false)
+        let contents = "void main() {}"
+        try Data(contents.utf8).write(to: fileURL)
+
+        let items = [
+            ScannedItem(
+                id: UUID(),
+                relativePath: "apps/mobile/lib",
+                kind: .directory,
+                expectedSize: 0,
+                isHidden: false,
+                isUbiquitous: false,
+                isLocalReady: true,
+                downloadStatusRaw: nil,
+                symlinkDestination: nil,
+                state: .copied,
+                lastError: nil
+            ),
+            ScannedItem(
+                id: UUID(),
+                relativePath: "apps/mobile/lib/main.dart",
+                kind: .file,
+                expectedSize: Int64(contents.utf8.count),
+                isHidden: false,
+                isUbiquitous: false,
+                isLocalReady: true,
+                downloadStatusRaw: nil,
+                symlinkDestination: nil,
+                state: .copied,
+                lastError: nil
+            )
+        ]
+
+        let result = try await VerificationEngine().verify(expectedItems: items, at: root)
+
+        XCTAssertEqual(result.verifiedCount, 2)
+        XCTAssertEqual(result.verifiedBytes, Int64(contents.utf8.count))
+    }
 }
 
 private actor VerificationProgressRecorder {

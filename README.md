@@ -194,6 +194,7 @@ Built-in exclusions include:
 - Python virtual environments and caches such as `.venv`, `venv`, `env`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox`
 - JavaScript dependency and build directories such as `node_modules`, `.pnpm-store`, `.parcel-cache`, `.next`, `.nuxt`, `.svelte-kit`, `.turbo`
 - generated build/tooling directories such as `.gradle`, `.dart_tool`, `.build`, `.swiftpm`, `.cache`, `DerivedData`
+- generated IDE/build output such as `build`, `.idea`, `.vscode`, `Pods`, `dist`, and `coverage`
 - repository metadata and temporary workspaces such as `.git`, `.tmp`, and `tmp`
 - generated files such as `.DS_Store`, `Thumbs.db`, `.pyc`, `.pyo`
 
