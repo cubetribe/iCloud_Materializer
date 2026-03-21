@@ -342,7 +342,7 @@ final class BatchCoordinatorTests: XCTestCase {
 
         let prefetchRecorder = BatchPrefetchRecorder()
         let recorder = BatchUpdateRecorder()
-        let coordinator = BatchCoordinator(projectPrefetcher: { url, _, _ in
+        let coordinator = BatchCoordinator(projectPrefetcher: { url, _, _, _, _, _ in
             await prefetchRecorder.record(url)
         })
         var configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
@@ -417,7 +417,7 @@ final class BatchCoordinatorTests: XCTestCase {
 
         let prefetchRecorder = BatchPrefetchRecorder()
         let recorder = BatchUpdateRecorder()
-        let coordinator = BatchCoordinator(projectPrefetcher: { url, _, _ in
+        let coordinator = BatchCoordinator(projectPrefetcher: { url, _, _, _, _, _ in
             await prefetchRecorder.record(url)
         })
 
@@ -435,11 +435,55 @@ final class BatchCoordinatorTests: XCTestCase {
         XCTAssertFalse(plans.first(where: { $0.sourceFolderName == "Beta" })?.detail?.contains("Project directory warmup requested.") ?? false)
     }
 
+    func testRunPrefetchesUpcomingProjectsInParallelWhenReadPressureIsEnabled() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("BatchSource", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("BatchDestination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try createFixture(named: "Alpha", in: sourceRoot)
+        try createFixture(named: "Beta", in: sourceRoot)
+        try createFixture(named: "Gamma", in: sourceRoot)
+        try createFixture(named: "Delta", in: sourceRoot)
+
+        let prefetchRecorder = ConcurrentPrefetchRecorder()
+        let coordinator = BatchCoordinator(projectPrefetcher: { url, _, _, _, _, pauseController in
+            try await pauseController.checkpoint()
+            await prefetchRecorder.begin(url)
+            do {
+                try await Task.sleep(for: .milliseconds(120))
+                await prefetchRecorder.end(url)
+            } catch {
+                await prefetchRecorder.end(url)
+                throw error
+            }
+        })
+        var configuration = makeConfiguration(
+            sourceRoot: sourceRoot,
+            destinationRoot: destinationRoot,
+            hydrationMode: .hybridReadPressure
+        )
+        configuration.projectPrefetchWindow = 3
+
+        await coordinator.run(
+            configuration: configuration,
+            pauseController: PauseController()
+        ) { _ in }
+
+        let snapshot = await prefetchRecorder.snapshot()
+        XCTAssertEqual(Set(snapshot.paths.map(\.lastPathComponent)), Set(["Beta", "Gamma", "Delta"]))
+        XCTAssertEqual(snapshot.maxConcurrent, 3)
+    }
+
     private func makeConfiguration(
         sourceRoot: URL,
         destinationRoot: URL,
         shouldCreateArchive: Bool = false,
-        orderingMode: BatchOrderingMode = .alphabetical
+        orderingMode: BatchOrderingMode = .alphabetical,
+        hydrationMode: HydrationMode = .apiOnly
     ) -> BatchConfiguration {
         BatchConfiguration(
             batchID: UUID(),
@@ -447,6 +491,7 @@ final class BatchCoordinatorTests: XCTestCase {
             destinationRootURL: destinationRoot,
             orderingMode: orderingMode,
             suffix: "Lokal",
+            hydrationMode: hydrationMode,
             transferPolicy: .exactCopy,
             priorityPolicy: TransferPriorityPolicy(mode: .criticalFirst),
             workerCount: 2,
@@ -487,6 +532,27 @@ private actor BatchPrefetchRecorder {
 
     func paths() -> [URL] {
         recorded
+    }
+}
+
+private actor ConcurrentPrefetchRecorder {
+    private var recorded: [URL] = []
+    private var activeCount = 0
+    private var maxConcurrent = 0
+
+    func begin(_ url: URL) {
+        recorded.append(url)
+        activeCount += 1
+        maxConcurrent = max(maxConcurrent, activeCount)
+    }
+
+    func end(_ url: URL) {
+        _ = url
+        activeCount = max(activeCount - 1, 0)
+    }
+
+    func snapshot() -> (paths: [URL], maxConcurrent: Int) {
+        (recorded, maxConcurrent)
     }
 }
 

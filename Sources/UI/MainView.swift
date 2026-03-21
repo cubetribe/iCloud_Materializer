@@ -308,6 +308,29 @@ struct MainView: View {
                 .frame(width: 360, alignment: .leading)
             }
 
+            GroupBox("Hydration Mode") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Mode", selection: $viewModel.hydrationMode) {
+                        ForEach(HydrationMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(viewModel.isRunning)
+
+                    Text(viewModel.hydrationModeDetail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("Hybrid or Read Pressure modes deliberately touch directories and files ahead of copy work so iCloud sees real usage earlier. That increases background pressure without waiting for the current chunk to stall first.")
+                        .font(.footnote)
+                        .foregroundStyle(viewModel.hydrationMode.usesReadPressure ? .orange : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(width: 360, alignment: .leading)
+            }
+
             GroupBox("Controls") {
                 VStack(alignment: .leading, spacing: 12) {
                     Stepper("Workers: \(viewModel.workerCount)", value: $viewModel.workerCount, in: viewModel.workerRange)
@@ -317,7 +340,7 @@ struct MainView: View {
                     Stepper("Retries: \(viewModel.retryCount)", value: $viewModel.retryCount, in: 1...6)
                         .disabled(viewModel.isRunning)
                     Text(viewModel.rescueProfile == .aggressive
-                        ? "Aggressive rescue raises worker and hydration budgets, enables upcoming-project prewarm, walks deeper into subdirectories to trigger iCloud hydration, and may hit CPU, disk, and iCloud harder. ZIP still stays out of the critical path."
+                        ? "Aggressive rescue raises worker and hydration budgets, enables upcoming-project prewarm, walks deeper into subdirectories to trigger iCloud hydration, and can combine API requests with IO-driven read pressure before copy work begins. ZIP still stays out of the critical path."
                         : "The rescue starts conservatively: fewer workers, smaller hydration windows, no blind project prewarm, and no automatic ZIP in the critical path.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)

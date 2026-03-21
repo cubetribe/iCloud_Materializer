@@ -3,31 +3,20 @@ import Foundation
 final class BatchCoordinator: @unchecked Sendable {
     private let fileManager: FileManager
     private let coordinatorFactory: @Sendable () -> MaterializerCoordinator
-    private let projectPrefetcher: @Sendable (URL, TransferPolicy, Int) async -> Void
+    private let projectPrefetcher: @Sendable (URL, TransferPolicy, Int, HydrationMode, Int, PauseController) async throws -> Void
 
     init(
         fileManager: FileManager = .default,
         coordinatorFactory: @escaping @Sendable () -> MaterializerCoordinator = { MaterializerCoordinator() },
-        projectPrefetcher: @escaping @Sendable (URL, TransferPolicy, Int) async -> Void = { url, transferPolicy, scanDepth in
-            let fileManager = FileManager.default
-            let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey, .isUbiquitousItemKey]
-            let childLimit = BatchCoordinator.prefetchCandidateLimit(scanDepth: scanDepth)
-            let candidates = BatchCoordinator.prefetchCandidateURLs(
+        projectPrefetcher: @escaping @Sendable (URL, TransferPolicy, Int, HydrationMode, Int, PauseController) async throws -> Void = { url, transferPolicy, scanDepth, hydrationMode, readPressureConcurrency, pauseController in
+            _ = try await HydrationPrimer.primeProject(
                 projectURL: url,
                 transferPolicy: transferPolicy,
-                childLimit: childLimit,
-                fileManager: fileManager
+                scanDepth: scanDepth,
+                hydrationMode: hydrationMode,
+                readPressureConcurrency: readPressureConcurrency,
+                pauseController: pauseController
             )
-            var requested = 0
-            for candidate in candidates where requested < childLimit + 1 {
-                guard !Task.isCancelled else { return }
-                guard let values = try? candidate.resourceValues(forKeys: resourceKeys),
-                      values.isUbiquitousItem == true else {
-                    continue
-                }
-                try? fileManager.startDownloadingUbiquitousItem(at: candidate)
-                requested += 1
-            }
         }
     ) {
         self.fileManager = fileManager
@@ -466,22 +455,70 @@ final class BatchCoordinator: @unchecked Sendable {
     ) async throws {
         guard configuration.projectPrefetchWindow > 0 else { return }
 
+        var scheduledIndices: [Int] = []
         var remaining = configuration.projectPrefetchWindow
         for nextIndex in projects.indices where nextIndex > currentIndex {
             try await pauseController.checkpoint()
             guard remaining > 0 else { break }
             guard shouldPrefetch(projects[nextIndex], prefetchedProjectSourcePaths: prefetchedProjectSourcePaths) else { continue }
-            let prefetchDepth = configuration.jobConfiguration(for: projects[nextIndex]).localPrefetchScanDepth
-            await projectPrefetcher(projects[nextIndex].sourceURL, configuration.transferPolicy, prefetchDepth)
-            try await pauseController.checkpoint()
-            prefetchedProjectSourcePaths.insert(projects[nextIndex].sourceURL.standardizedFileURL.path)
-            let hint = "Project directory warmup requested."
-            if projects[nextIndex].detail?.contains(hint) != true {
-                projects[nextIndex].detail = [projects[nextIndex].detail, hint]
-                    .compactMap { $0 }
-                    .joined(separator: "\n")
-            }
+            scheduledIndices.append(nextIndex)
             remaining -= 1
+        }
+
+        guard !scheduledIndices.isEmpty else { return }
+
+        let scheduledPlans = scheduledIndices.map { nextIndex -> (index: Int, sourceURL: URL, prefetchDepth: Int, readPressureConcurrency: Int) in
+            let jobConfiguration = configuration.jobConfiguration(for: projects[nextIndex])
+            return (
+                index: nextIndex,
+                sourceURL: projects[nextIndex].sourceURL,
+                prefetchDepth: jobConfiguration.localPrefetchScanDepth,
+                readPressureConcurrency: jobConfiguration.readPressureConcurrency
+            )
+        }
+
+        let concurrency = min(configuration.projectPrefetchConcurrency, scheduledPlans.count)
+        var iterator = scheduledPlans.makeIterator()
+
+        try await withThrowingTaskGroup(of: Int.self) { group in
+            for _ in 0..<concurrency {
+                guard let plan = iterator.next() else { break }
+                group.addTask { [self] in
+                    try await self.projectPrefetcher(
+                        plan.sourceURL,
+                        configuration.transferPolicy,
+                        plan.prefetchDepth,
+                        configuration.hydrationMode,
+                        plan.readPressureConcurrency,
+                        pauseController
+                    )
+                    return plan.index
+                }
+            }
+
+            while let finishedIndex = try await group.next() {
+                try await pauseController.checkpoint()
+                prefetchedProjectSourcePaths.insert(projects[finishedIndex].sourceURL.standardizedFileURL.path)
+                let hint = "Project directory warmup requested."
+                if projects[finishedIndex].detail?.contains(hint) != true {
+                    projects[finishedIndex].detail = [projects[finishedIndex].detail, hint]
+                        .compactMap { $0 }
+                        .joined(separator: "\n")
+                }
+
+                guard let plan = iterator.next() else { continue }
+                group.addTask { [self] in
+                    try await self.projectPrefetcher(
+                        plan.sourceURL,
+                        configuration.transferPolicy,
+                        plan.prefetchDepth,
+                        configuration.hydrationMode,
+                        plan.readPressureConcurrency,
+                        pauseController
+                    )
+                    return plan.index
+                }
+            }
         }
     }
 

@@ -201,6 +201,15 @@ enum RescueProfile: String, Codable, Sendable, CaseIterable, Identifiable {
         }
     }
 
+    var defaultHydrationMode: HydrationMode {
+        switch self {
+        case .conservative:
+            return .apiOnly
+        case .aggressive:
+            return .hybridReadPressure
+        }
+    }
+
     var hydrationHotSlotDuration: Duration {
         switch self {
         case .conservative:
@@ -216,6 +225,65 @@ enum RescueProfile: String, Codable, Sendable, CaseIterable, Identifiable {
             return "Rescue profile: Conservative rescue with small queues, no batch prewarm, and lower system pressure"
         case .aggressive:
             return "Rescue profile: Aggressive rescue with larger queues, batch prewarm, and higher CPU/iCloud pressure"
+        }
+    }
+}
+
+enum HydrationMode: String, Codable, Sendable, CaseIterable, Identifiable {
+    case apiOnly
+    case hybridReadPressure
+    case readPressureOnly
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .apiOnly:
+            return "API Only"
+        case .hybridReadPressure:
+            return "Hybrid"
+        case .readPressureOnly:
+            return "Read Pressure"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .apiOnly:
+            return "Use only Apple's official `startDownloadingUbiquitousItem` requests."
+        case .hybridReadPressure:
+            return "Combine API requests with real directory/file IO so iCloud sees actual usage sooner."
+        case .readPressureOnly:
+            return "Skip API requests and drive hydration through real IO pressure only."
+        }
+    }
+
+    var runtimeSummary: String {
+        switch self {
+        case .apiOnly:
+            return "Hydration mode: API-only requests via startDownloadingUbiquitousItem"
+        case .hybridReadPressure:
+            return "Hydration mode: Hybrid API requests plus IO-driven read pressure"
+        case .readPressureOnly:
+            return "Hydration mode: IO-driven read pressure without API download requests"
+        }
+    }
+
+    var usesAPIRequests: Bool {
+        switch self {
+        case .apiOnly, .hybridReadPressure:
+            return true
+        case .readPressureOnly:
+            return false
+        }
+    }
+
+    var usesReadPressure: Bool {
+        switch self {
+        case .apiOnly:
+            return false
+        case .hybridReadPressure, .readPressureOnly:
+            return true
         }
     }
 }
@@ -544,6 +612,7 @@ struct JobConfiguration: Sendable {
     var finalArchiveURL: URL? = nil
     var preflightReport: PreflightReport? = nil
     var rescueProfile: RescueProfile = .conservative
+    var hydrationMode: HydrationMode = .apiOnly
     var transferPolicy: TransferPolicy
     var priorityPolicy: TransferPriorityPolicy
     var workerCount: Int
@@ -600,8 +669,13 @@ struct JobConfiguration: Sendable {
     }
 
     var topLevelWarmupConcurrency: Int {
-        guard rescueProfile == .aggressive else { return 0 }
+        guard rescueProfile == .aggressive || hydrationMode.usesReadPressure else { return 0 }
         return min(max(workerCount, 2), 8)
+    }
+
+    var readPressureConcurrency: Int {
+        guard hydrationMode.usesReadPressure else { return 0 }
+        return min(max(workerCount / 2, 2), 4)
     }
 
     static func resumeJobID(
@@ -659,6 +733,7 @@ struct BatchConfiguration: Sendable {
     var orderingMode: BatchOrderingMode = .newestFirst
     var suffix: String
     var rescueProfile: RescueProfile = .conservative
+    var hydrationMode: HydrationMode = .apiOnly
     var transferPolicy: TransferPolicy
     var priorityPolicy: TransferPriorityPolicy
     var workerCount: Int
@@ -671,6 +746,12 @@ struct BatchConfiguration: Sendable {
     var hydrationHotSlotDuration: Duration = .seconds(6)
     var enableFinderFallback: Bool
     var projectPrefetchWindow: Int = 4
+
+    var projectPrefetchConcurrency: Int {
+        guard projectPrefetchWindow > 0 else { return 0 }
+        let ceiling = hydrationMode.usesReadPressure ? 4 : 2
+        return min(projectPrefetchWindow, ceiling)
+    }
 
     var archiveRootURL: URL {
         sourceRootURL.appendingPathComponent("_Materializer_Archives", isDirectory: true)
@@ -776,6 +857,7 @@ struct BatchConfiguration: Sendable {
             targetFolderName: plan.targetFolderName,
             finalArchiveURL: shouldCreateArchive ? archiveRootURL.appendingPathComponent("\(plan.sourceFolderName).zip", isDirectory: false) : nil,
             rescueProfile: rescueProfile,
+            hydrationMode: hydrationMode,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
             workerCount: workerCount,

@@ -45,6 +45,7 @@ final class MainViewModel {
     var pendingConflict: PromotionConflictState?
     var workerCount: Int = RescueProfile.conservative.defaultWorkerCount
     var hydrationWindow: Int = RescueProfile.conservative.defaultHydrationWindow
+    var hydrationMode: HydrationMode = RescueProfile.conservative.defaultHydrationMode
     var retryCount: Int = RescueProfile.conservative.defaultRetryCount
     var isPaused = false
     private(set) var lastProgressAt: Date?
@@ -146,12 +147,16 @@ final class MainViewModel {
         let hydrationLookahead = currentHydrationPrefetchWindow == 0
             ? "hydration lookahead off"
             : "hydration lookahead \(currentHydrationPrefetchWindow)"
-        let directoryWarmup = rescueProfile == .aggressive ? "deep directory warmup on" : "directory warmup modest"
-        return "\(clampedWorkerCount) workers, hydration window \(clampedHydrationWindow), \(batchPrefetch), \(hydrationLookahead), \(directoryWarmup)."
+        let directoryWarmup = rescueProfile == .aggressive || hydrationMode.usesReadPressure ? "deep directory warmup on" : "directory warmup modest"
+        return "\(clampedWorkerCount) workers, hydration window \(clampedHydrationWindow), mode \(hydrationMode.title), \(batchPrefetch), \(hydrationLookahead), \(directoryWarmup)."
     }
 
     var rescueProfileDetail: String {
         rescueProfile.subtitle
+    }
+
+    var hydrationModeDetail: String {
+        hydrationMode.subtitle
     }
 
     var batchOrderingDetail: String {
@@ -178,6 +183,7 @@ final class MainViewModel {
             orderingMode: batchOrderingMode,
             suffix: batchSuffix,
             rescueProfile: rescueProfile,
+            hydrationMode: rescueProfile.defaultHydrationMode,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
             workerCount: rescueProfile.defaultWorkerCount,
@@ -202,6 +208,7 @@ final class MainViewModel {
             orderingMode: batchOrderingMode,
             suffix: batchSuffix,
             rescueProfile: rescueProfile,
+            hydrationMode: rescueProfile.defaultHydrationMode,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
             workerCount: rescueProfile.defaultWorkerCount,
@@ -410,6 +417,7 @@ final class MainViewModel {
             destinationURL: destinationURL,
             preflightReport: preflightReport,
             rescueProfile: rescueProfile,
+            hydrationMode: hydrationMode,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
             workerCount: clampedWorkerCount,
@@ -478,6 +486,7 @@ final class MainViewModel {
             orderingMode: batchOrderingMode,
             suffix: batchSuffix,
             rescueProfile: rescueProfile,
+            hydrationMode: hydrationMode,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
             workerCount: clampedWorkerCount,
@@ -608,6 +617,7 @@ final class MainViewModel {
     private func applyRescueProfileDefaults(_ profile: RescueProfile) {
         workerCount = profile.defaultWorkerCount
         hydrationWindow = profile.defaultHydrationWindow
+        hydrationMode = profile.defaultHydrationMode
         retryCount = profile.defaultRetryCount
     }
 

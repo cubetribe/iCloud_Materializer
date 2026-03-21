@@ -15,6 +15,7 @@ That was also the main bottleneck in this project. The rescue app was already pa
 - shallow-first discovery so useful work starts earlier
 - explicit hydration telemetry for queued, downloading, stalled, and request-failed items
 - bounded parallel warmup of multiple top-level directories in aggressive mode
+- explicit hydration-mode control so the app can switch from API-only requests to real IO-driven read pressure
 - staged copy plus verification before anything becomes the visible target
 - persistent logs and resume state for post-mortem debugging and retries
 
@@ -49,6 +50,9 @@ Implemented today:
 - mandatory preflight before rescue runs start
 - shallow-first discovery, hydration, staged copy, verification, and promotion
 - aggressive rescue warmup that can request hydration across multiple top-level directories in parallel
+- selectable hydration modes: API only, hybrid API plus read pressure, and read-pressure-only
+- queued read-pressure probes that touch directories and small file reads before the copy workers need the data
+- parallel prewarm of multiple upcoming batch projects so the next rescue candidates are already nudged before the current project finishes
 - live telemetry, logs, failures, stall warnings, and hydration-state timing
 - transfer scope presets for exact copies vs. coding-project copies
 - priority presets for critical files first
@@ -85,6 +89,16 @@ For a single project run, the app executes this pipeline:
 9. stop after the verified local copy is complete; ZIP creation is a later manual follow-up
 
 For batch runs, the selected source root is treated as a queue of independent project runs. Each direct subfolder becomes its own isolated project job.
+
+## Hydration Modes
+
+The app now exposes three hydration strategies:
+
+- `API Only`: only issue `startDownloadingUbiquitousItem` requests
+- `Hybrid`: combine API requests with IO-driven read pressure
+- `Read Pressure`: skip API requests and trigger hydration by touching directories and small file reads
+
+The hybrid and read-pressure modes exist because large iCloud rescues often respond more strongly to actual IO than to download requests alone. In practice this means the app can now warm cold trees before copy work begins and can do that across several roots in parallel.
 
 ## Preflight
 
@@ -142,7 +156,7 @@ Behavior:
 - `_Materializer_Archives` and `.icloud-materializer` are ignored as source children
 - each project produces its own local copy; archive/deletion review is no longer part of the default critical path
 - very large queues are windowed in the live UI so monitoring stays responsive while the full persisted batch state still tracks every project
-- project-root prewarming is disabled by default for rescue runs
+- project-root prewarming stays conservative by default, but aggressive/hybrid rescue can prewarm multiple upcoming projects in parallel
 - completed batch projects can be resumed or skipped on later reruns when their expected outputs still exist
 
 Batch runtime artifacts:
@@ -299,6 +313,7 @@ The generated Xcode project should be treated as derived from [project.yml](proj
 - there is no dedicated deletion review or execute workflow yet
 - Finder fallback can still be fragile on very large or changing trees because it depends on macOS Automation and Finder stability
 - throughput still depends heavily on iCloud/File Provider behavior; aggressive mode now prewarms up to eight top-level directories in parallel, but the final download rate is still ultimately gated by Apple's File Provider stack and may not show up as high CPU usage inside this app process
+- read-pressure modes increase the chance that iCloud starts pulling data sooner, but they still cannot guarantee a global "download all now" behavior because Apple does not expose a reliable bulk-sync control plane
 - batch copy is still promoted one project at a time; the speed-up now comes mainly from shallow-first discovery, earlier usable progress, and fewer cold items blocking hot work
 - single-project retries can reuse persisted discovery inventory, but they do not yet resume already copied/promoted chunk state at sub-phase granularity
 - the current batch resume model is queue-oriented; it does not yet expose a dedicated UI for repairing a partially successful single project at sub-phase granularity

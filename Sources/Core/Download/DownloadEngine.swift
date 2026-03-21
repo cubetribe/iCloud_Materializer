@@ -31,6 +31,7 @@ struct DownloadEngine: Sendable {
         var coolingQueue: [CoolingHydration] = []
         let hydrationSession = hydrationSession ?? HydrationSession(maxRequestedHydrations: configuration.maxRequestedHydrations)
         var adaptiveWindow = min(max(configuration.hydrationWindow, 1), 2)
+        var readPressurePrimedPaths: Set<String> = []
 
         for item in sortedItems {
             try await pauseController.checkpoint()
@@ -63,6 +64,12 @@ struct DownloadEngine: Sendable {
                     hotQueue: hotQueue,
                     hydrationSession: hydrationSession,
                     scanDepth: configuration.localPrefetchScanDepth
+                )
+                try await applyReadPressurePrefetch(
+                    hotQueue: hotQueue,
+                    configuration: configuration,
+                    pauseController: pauseController,
+                    primedPaths: &readPressurePrimedPaths
                 )
 
                 while inflight.count < adaptiveWindow, !hotQueue.isEmpty {
@@ -283,6 +290,38 @@ struct DownloadEngine: Sendable {
             }
         }
         coolingQueue = retained
+    }
+
+    private func applyReadPressurePrefetch(
+        hotQueue: [PendingHydration],
+        configuration: JobConfiguration,
+        pauseController: PauseController,
+        primedPaths: inout Set<String>
+    ) async throws {
+        guard configuration.readPressureConcurrency > 0 else { return }
+
+        let candidates = hotQueue
+            .prefix(configuration.localPrefetchScanDepth)
+            .filter { primedPaths.contains($0.item.relativePath) == false }
+            .map { pending in
+                HydrationPrimingCandidate(
+                    url: pending.sourceURL,
+                    relativePath: pending.item.relativePath
+                )
+            }
+
+        guard !candidates.isEmpty else { return }
+
+        _ = try await HydrationPrimer.prime(
+            candidates: candidates,
+            hydrationMode: .readPressureOnly,
+            readPressureConcurrency: configuration.readPressureConcurrency,
+            pauseController: pauseController
+        )
+
+        for candidate in candidates {
+            primedPaths.insert(candidate.relativePath)
+        }
     }
 }
 

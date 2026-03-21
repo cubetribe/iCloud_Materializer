@@ -87,6 +87,13 @@ final class MaterializerCoordinator: @unchecked Sendable {
             )
             await log(
                 .info,
+                configuration.hydrationMode.runtimeSummary,
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate
+            )
+            await log(
+                .info,
                 "Hydration window: \(configuration.hydrationWindow) active iCloud items per worker, lookahead buffer \(configuration.effectiveHydrationPrefetchBuffer) overall, up to \(configuration.maxActiveHydrations) active / \(configuration.maxRequestedHydrations) requested overall",
                 jobID: configuration.jobID,
                 store: store,
@@ -96,6 +103,15 @@ final class MaterializerCoordinator: @unchecked Sendable {
                 await log(
                     .info,
                     "Top-level directory warmup concurrency: up to \(configuration.topLevelWarmupConcurrency) directory roots in parallel",
+                    jobID: configuration.jobID,
+                    store: store,
+                    onUpdate: onUpdate
+                )
+            }
+            if configuration.readPressureConcurrency > 0 {
+                await log(
+                    .info,
+                    "Read-pressure probe concurrency: up to \(configuration.readPressureConcurrency) file or directory touches in parallel per warmup lane",
                     jobID: configuration.jobID,
                     store: store,
                     onUpdate: onUpdate
@@ -1077,7 +1093,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
         store: JobStore,
         onUpdate: @escaping @Sendable (JobUpdate) async -> Void
     ) async throws {
-        guard configuration.rescueProfile == .aggressive else { return }
+        guard configuration.topLevelWarmupConcurrency > 0 else { return }
         try await pauseController.checkpoint()
 
         let directoryURL = configuration.sourceURL.appendingPathComponent(directory.relativePath, isDirectory: true)
@@ -1086,28 +1102,32 @@ final class MaterializerCoordinator: @unchecked Sendable {
             projectURL: directoryURL,
             transferPolicy: configuration.transferPolicy,
             childLimit: candidateLimit
-        )
-        let resourceKeys: Set<URLResourceKey> = [.isUbiquitousItemKey]
-
-        var requestedCount = 0
-        for candidate in candidates {
-            try await pauseController.checkpoint()
-            guard let values = try? candidate.resourceValues(forKeys: resourceKeys),
-                  values.isUbiquitousItem == true else {
-                continue
-            }
-            do {
-                try FileManager.default.startDownloadingUbiquitousItem(at: candidate)
-                requestedCount += 1
-            } catch {
-                continue
-            }
+        ).map { candidate in
+            HydrationPrimingCandidate(
+                url: candidate,
+                relativePath: normalizedRelativePath(for: candidate, rootURL: configuration.sourceURL)
+            )
         }
 
-        guard requestedCount > 0 else { return }
+        let report = try await HydrationPrimer.prime(
+            candidates: candidates,
+            hydrationMode: configuration.hydrationMode,
+            readPressureConcurrency: configuration.readPressureConcurrency,
+            pauseController: pauseController
+        )
+
+        guard report.didWork else { return }
+        let details = [
+            report.requestedCount > 0 ? "\(report.requestedCount) API request(s)" : nil,
+            report.readPressureDirectoryCount > 0 ? "\(report.readPressureDirectoryCount) directory probe(s)" : nil,
+            report.readPressureFileCount > 0 ? "\(report.readPressureFileCount) file probe(s)" : nil,
+            report.readPressureFailureCount > 0 ? "\(report.readPressureFailureCount) probe failure(s)" : nil
+        ]
+            .compactMap { $0 }
+            .joined(separator: ", ")
         await log(
             .info,
-            "Directory warmup requested for \(directory.relativePath) across \(requestedCount) path(s)",
+            "Directory warmup requested for \(directory.relativePath): \(details)",
             jobID: configuration.jobID,
             store: store,
             onUpdate: onUpdate,
@@ -1167,6 +1187,15 @@ final class MaterializerCoordinator: @unchecked Sendable {
         case .missingFolderSelection, .invalidDestination, .invalidBatchSource, .persistenceFailed:
             return .persistence
         }
+    }
+
+    private func normalizedRelativePath(for url: URL, rootURL: URL) -> String {
+        let rootPath = rootURL.standardizedFileURL.path
+        let candidatePath = url.standardizedFileURL.path
+        if candidatePath == rootPath {
+            return rootURL.lastPathComponent
+        }
+        return candidatePath.replacingOccurrences(of: "\(rootPath)/", with: "")
     }
 }
 

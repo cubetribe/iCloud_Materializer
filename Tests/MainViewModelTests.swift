@@ -9,11 +9,13 @@ final class MainViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.rescueProfile, .conservative)
         XCTAssertEqual(viewModel.workerCount, RescueProfile.conservative.defaultWorkerCount)
         XCTAssertEqual(viewModel.hydrationWindow, RescueProfile.conservative.defaultHydrationWindow)
+        XCTAssertEqual(viewModel.hydrationMode, RescueProfile.conservative.defaultHydrationMode)
 
         viewModel.rescueProfile = .aggressive
 
         XCTAssertEqual(viewModel.workerCount, RescueProfile.aggressive.defaultWorkerCount)
         XCTAssertEqual(viewModel.hydrationWindow, RescueProfile.aggressive.defaultHydrationWindow)
+        XCTAssertEqual(viewModel.hydrationMode, RescueProfile.aggressive.defaultHydrationMode)
         XCTAssertEqual(viewModel.retryCount, RescueProfile.aggressive.defaultRetryCount)
         XCTAssertEqual(viewModel.workerRange, RescueProfile.aggressive.workerRange)
         XCTAssertEqual(viewModel.hydrationRange, RescueProfile.aggressive.hydrationRange)
@@ -32,6 +34,7 @@ final class MainViewModelTests: XCTestCase {
 
         XCTAssertEqual(viewModel.workerCount, RescueProfile.conservative.defaultWorkerCount)
         XCTAssertEqual(viewModel.hydrationWindow, RescueProfile.conservative.defaultHydrationWindow)
+        XCTAssertEqual(viewModel.hydrationMode, RescueProfile.conservative.defaultHydrationMode)
         XCTAssertEqual(viewModel.retryCount, RescueProfile.conservative.defaultRetryCount)
         XCTAssertEqual(viewModel.currentHydrationPrefetchWindow, 0)
         XCTAssertEqual(viewModel.currentProjectPrefetchWindow, 0)

@@ -13,6 +13,7 @@
 		264D6171078A7EE315E96DBA /* MaterializerCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F3D8D519397656944135645 /* MaterializerCoordinatorTests.swift */; };
 		269A5233693B6FFC6BCB3515 /* FolderAccessManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A166036201DFB64FCB466F7D /* FolderAccessManager.swift */; };
 		308A6426116F098F25FB20C9 /* ChunkPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498B95691163A19854ADCD47 /* ChunkPlannerTests.swift */; };
+		3AECFF128A25C4462E7BD0E9 /* HydrationPrimer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9C9F2E6A438CA1154C0F1E7 /* HydrationPrimer.swift */; };
 		3AF22C3B1B112F0C1A0EE87D /* ZipEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DF7CA8D33022C9CCEF90A0B /* ZipEngine.swift */; };
 		46EB40E8852800BF2D783A8D /* ScanEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDDAE7634CE88CE834A22AF1 /* ScanEngineTests.swift */; };
 		4780277E0E058420BF3A7D2A /* iCloudMaterializerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A37BC611365F3FFE1F9DCE4F /* iCloudMaterializerApp.swift */; };
@@ -44,6 +45,7 @@
 		D0F141A113C2033108138D0C /* PreflightEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B93F2BDE93362EBE99246B7 /* PreflightEngine.swift */; };
 		D53EC15AA53F4D0619D63854 /* MaterializerCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90D3563BCCDEF33C52AF39D9 /* MaterializerCoordinator.swift */; };
 		DABC699DA49D7B91BDF214C9 /* TransferPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B444C7FD975FC55DEEAAACDC /* TransferPolicyTests.swift */; };
+		DCC20A2729CE81310AC71A4B /* HydrationPrimerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4ED9419DAA4B412191650990 /* HydrationPrimerTests.swift */; };
 		DFCA45CB5111DD8123219AC3 /* BatchNamingModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5000DA6A505EF2FF86288C16 /* BatchNamingModeTests.swift */; };
 		E63C7B966D3419EF91C8DCC5 /* ChunkPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29EBEC81A942B8865C95FD7C /* ChunkPlanner.swift */; };
 		E8B4FD3C47D2FA503E41AB38 /* VerificationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CECD4747EA4DF854FFD805F /* VerificationEngine.swift */; };
@@ -79,6 +81,7 @@
 		469468CAC9BD136E14987B49 /* DownloadEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadEngine.swift; sourceTree = "<group>"; };
 		47A51C1E42687846D60C1DEE /* CopyEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyEngine.swift; sourceTree = "<group>"; };
 		498B95691163A19854ADCD47 /* ChunkPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChunkPlannerTests.swift; sourceTree = "<group>"; };
+		4ED9419DAA4B412191650990 /* HydrationPrimerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HydrationPrimerTests.swift; sourceTree = "<group>"; };
 		5000DA6A505EF2FF86288C16 /* BatchNamingModeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BatchNamingModeTests.swift; sourceTree = "<group>"; };
 		5B93F2BDE93362EBE99246B7 /* PreflightEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreflightEngine.swift; sourceTree = "<group>"; };
 		5DF7CA8D33022C9CCEF90A0B /* ZipEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZipEngine.swift; sourceTree = "<group>"; };
@@ -106,6 +109,7 @@
 		D6AB68996C675FB8F0983E0A /* ProgressTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProgressTracker.swift; sourceTree = "<group>"; };
 		D7F672BC23BD1E3E150820E5 /* TransferPriorityPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransferPriorityPolicyTests.swift; sourceTree = "<group>"; };
 		E69717B1EE0417A29D536538 /* RunHealth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunHealth.swift; sourceTree = "<group>"; };
+		E9C9F2E6A438CA1154C0F1E7 /* HydrationPrimer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HydrationPrimer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -167,6 +171,7 @@
 			isa = PBXGroup;
 			children = (
 				469468CAC9BD136E14987B49 /* DownloadEngine.swift */,
+				E9C9F2E6A438CA1154C0F1E7 /* HydrationPrimer.swift */,
 			);
 			path = Download;
 			sourceTree = "<group>";
@@ -192,6 +197,7 @@
 				5000DA6A505EF2FF86288C16 /* BatchNamingModeTests.swift */,
 				498B95691163A19854ADCD47 /* ChunkPlannerTests.swift */,
 				B2851A9A4F4251F075B2C8D9 /* DownloadEngineTests.swift */,
+				4ED9419DAA4B412191650990 /* HydrationPrimerTests.swift */,
 				24BA13DD00EEA77F8DEC5A70 /* JobStoreTests.swift */,
 				9DEC4C4DEF2E94D2DDDF8393 /* MainViewModelTests.swift */,
 				3F3D8D519397656944135645 /* MaterializerCoordinatorTests.swift */,
@@ -399,6 +405,7 @@
 				91EDE725833181BC196D96CC /* DownloadEngine.swift in Sources */,
 				4BC53877BC54E3BA0092BAC9 /* FinderRecoveryEngine.swift in Sources */,
 				269A5233693B6FFC6BCB3515 /* FolderAccessManager.swift in Sources */,
+				3AECFF128A25C4462E7BD0E9 /* HydrationPrimer.swift in Sources */,
 				8BA0E6AA363F0007174D9E06 /* JobModels.swift in Sources */,
 				D02351E9BB5AA9567C97812A /* JobStore.swift in Sources */,
 				B4F4A0F8CE1CE285E2F591C3 /* MainView.swift in Sources */,
@@ -429,6 +436,7 @@
 				DFCA45CB5111DD8123219AC3 /* BatchNamingModeTests.swift in Sources */,
 				308A6426116F098F25FB20C9 /* ChunkPlannerTests.swift in Sources */,
 				926F875AF14DA00BBE23F48A /* DownloadEngineTests.swift in Sources */,
+				DCC20A2729CE81310AC71A4B /* HydrationPrimerTests.swift in Sources */,
 				02976F7A31A30AEF56400048 /* JobStoreTests.swift in Sources */,
 				A2B16D632D81B8FDCD3B2443 /* MainViewModelTests.swift in Sources */,
 				264D6171078A7EE315E96DBA /* MaterializerCoordinatorTests.swift in Sources */,
