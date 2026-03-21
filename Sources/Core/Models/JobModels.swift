@@ -75,6 +75,151 @@ enum BatchNamingMode: String, Codable, Sendable, CaseIterable, Identifiable {
     }
 }
 
+enum BatchOrderingMode: String, Codable, Sendable, CaseIterable, Identifiable {
+    case newestFirst
+    case oldestFirst
+    case alphabetical
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .newestFirst:
+            return "Newest First"
+        case .oldestFirst:
+            return "Oldest First"
+        case .alphabetical:
+            return "A-Z"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .newestFirst:
+            return "Run the most recently changed top-level projects before older rescue candidates."
+        case .oldestFirst:
+            return "Drain the oldest top-level projects first."
+        case .alphabetical:
+            return "Keep a stable folder-name order."
+        }
+    }
+}
+
+enum RescueProfile: String, Codable, Sendable, CaseIterable, Identifiable {
+    case conservative
+    case aggressive
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .conservative:
+            return "Conservative"
+        case .aggressive:
+            return "Aggressive"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .conservative:
+            return "Favor predictable long rescue runs with smaller queues and no blind prewarm."
+        case .aggressive:
+            return "Use more CPU, I/O, and iCloud pressure to pull ready data back faster on a strong Mac."
+        }
+    }
+
+    var workerRange: ClosedRange<Int> {
+        switch self {
+        case .conservative:
+            return 1...4
+        case .aggressive:
+            return 2...16
+        }
+    }
+
+    var hydrationRange: ClosedRange<Int> {
+        switch self {
+        case .conservative:
+            return 2...8
+        case .aggressive:
+            return 4...24
+        }
+    }
+
+    var defaultWorkerCount: Int {
+        switch self {
+        case .conservative:
+            return 2
+        case .aggressive:
+            return 8
+        }
+    }
+
+    var defaultHydrationWindow: Int {
+        switch self {
+        case .conservative:
+            return 4
+        case .aggressive:
+            return 12
+        }
+    }
+
+    var defaultRetryCount: Int {
+        switch self {
+        case .conservative:
+            return 2
+        case .aggressive:
+            return 3
+        }
+    }
+
+    var backoffSchedule: [Duration] {
+        switch self {
+        case .conservative:
+            return [.seconds(0), .seconds(2), .seconds(5), .seconds(15)]
+        case .aggressive:
+            return [.seconds(0), .seconds(1), .seconds(2), .seconds(5)]
+        }
+    }
+
+    var hydrationPrefetchWindow: Int {
+        switch self {
+        case .conservative:
+            return 0
+        case .aggressive:
+            return 32
+        }
+    }
+
+    var projectPrefetchWindow: Int {
+        switch self {
+        case .conservative:
+            return 0
+        case .aggressive:
+            return 2
+        }
+    }
+
+    var hydrationHotSlotDuration: Duration {
+        switch self {
+        case .conservative:
+            return .seconds(6)
+        case .aggressive:
+            return .seconds(3)
+        }
+    }
+
+    var runtimeSummary: String {
+        switch self {
+        case .conservative:
+            return "Rescue profile: Conservative rescue with small queues, no batch prewarm, and lower system pressure"
+        case .aggressive:
+            return "Rescue profile: Aggressive rescue with larger queues, batch prewarm, and higher CPU/iCloud pressure"
+        }
+    }
+}
+
 enum BatchState: String, Codable, Sendable, CaseIterable {
     case idle
     case running
@@ -398,6 +543,7 @@ struct JobConfiguration: Sendable {
     var targetFolderName: String? = nil
     var finalArchiveURL: URL? = nil
     var preflightReport: PreflightReport? = nil
+    var rescueProfile: RescueProfile = .conservative
     var transferPolicy: TransferPolicy
     var priorityPolicy: TransferPriorityPolicy
     var workerCount: Int
@@ -505,7 +651,9 @@ struct BatchConfiguration: Sendable {
     var sourceRootURL: URL
     var destinationRootURL: URL
     var namingMode: BatchNamingMode = .suffix
+    var orderingMode: BatchOrderingMode = .newestFirst
     var suffix: String
+    var rescueProfile: RescueProfile = .conservative
     var transferPolicy: TransferPolicy
     var priorityPolicy: TransferPriorityPolicy
     var workerCount: Int
@@ -515,6 +663,7 @@ struct BatchConfiguration: Sendable {
     var maxHydrationWait: Duration
     var shouldCreateArchive: Bool = false
     var hydrationPrefetchWindow: Int = 0
+    var hydrationHotSlotDuration: Duration = .seconds(6)
     var enableFinderFallback: Bool
     var projectPrefetchWindow: Int = 4
 
@@ -621,6 +770,7 @@ struct BatchConfiguration: Sendable {
             destinationURL: destinationRootURL,
             targetFolderName: plan.targetFolderName,
             finalArchiveURL: shouldCreateArchive ? archiveRootURL.appendingPathComponent("\(plan.sourceFolderName).zip", isDirectory: false) : nil,
+            rescueProfile: rescueProfile,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
             workerCount: workerCount,
@@ -630,6 +780,7 @@ struct BatchConfiguration: Sendable {
             maxHydrationWait: maxHydrationWait,
             shouldCreateArchive: shouldCreateArchive,
             hydrationPrefetchWindow: hydrationPrefetchWindow,
+            hydrationHotSlotDuration: hydrationHotSlotDuration,
             allowTargetQuarantine: false,
             enableFinderFallback: enableFinderFallback
         )

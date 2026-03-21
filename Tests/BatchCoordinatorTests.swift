@@ -26,6 +26,30 @@ final class BatchCoordinatorTests: XCTestCase {
         XCTAssertEqual(plans.last?.state, .conflicted)
     }
 
+    func testPlanProjectsDefaultsToNewestProjectsFirst() throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("BatchSource", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("BatchDestination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        let older = sourceRoot.appendingPathComponent("Alpha", isDirectory: true)
+        let newer = sourceRoot.appendingPathComponent("Beta", isDirectory: true)
+        try fileManager.createDirectory(at: older, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: newer, withIntermediateDirectories: true)
+        try fileManager.setAttributes([.modificationDate: Date(timeIntervalSince1970: 10)], ofItemAtPath: older.path)
+        try fileManager.setAttributes([.modificationDate: Date(timeIntervalSince1970: 20)], ofItemAtPath: newer.path)
+
+        let coordinator = BatchCoordinator()
+        var configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
+        configuration.orderingMode = .newestFirst
+        let plans = try coordinator.planProjects(configuration: configuration)
+
+        XCTAssertEqual(plans.map(\.sourceFolderName), ["Beta", "Alpha"])
+    }
+
     func testPreviewRestoresCompletedProjectsFromPersistedBatchState() throws {
         let fileManager = FileManager.default
         let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -272,6 +296,37 @@ final class BatchCoordinatorTests: XCTestCase {
         XCTAssertFalse(candidateNames.contains(".venv"))
     }
 
+    func testPrefetchCandidatesTraverseNestedDirectoriesWithinBudget() throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let projectRoot = workspace.appendingPathComponent("Alpha", isDirectory: true)
+        let nested = projectRoot.appendingPathComponent("src/FeatureA", isDirectory: true)
+        try fileManager.createDirectory(at: nested, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try Data("hello".utf8).write(to: nested.appendingPathComponent("view.swift", isDirectory: false))
+
+        let candidates = BatchCoordinator.prefetchCandidateURLs(
+            projectURL: projectRoot,
+            transferPolicy: .exactCopy,
+            childLimit: 8,
+            fileManager: fileManager
+        )
+
+        let rootPath = projectRoot.standardizedFileURL.path
+        let relativePaths = Set(candidates.map { url in
+            let candidatePath = url.standardizedFileURL.path
+            if candidatePath == rootPath {
+                return projectRoot.lastPathComponent
+            }
+            return candidatePath.replacingOccurrences(of: "\(rootPath)/", with: "")
+        })
+        XCTAssertTrue(relativePaths.contains("Alpha"))
+        XCTAssertTrue(relativePaths.contains("src"))
+        XCTAssertTrue(relativePaths.contains("src/FeatureA"))
+        XCTAssertTrue(relativePaths.contains("src/FeatureA/view.swift"))
+    }
+
     func testRunPrefetchesUpcomingProjectRoots() async throws {
         let fileManager = FileManager.default
         let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -348,7 +403,7 @@ final class BatchCoordinatorTests: XCTestCase {
                     sourceFolderName: "Beta",
                     targetFolderName: "Beta-Lokal",
                     state: .pending,
-                    detail: "Project root prefetch requested.",
+                    detail: "Project directory warmup requested.",
                     archiveURL: nil,
                     deletionManifestURL: nil,
                     readyForDeletion: false,
@@ -377,18 +432,20 @@ final class BatchCoordinatorTests: XCTestCase {
         let plans = await recorder.lastBatchProjects()
 
         XCTAssertEqual(prefetchedNames, Set(["Beta", "Gamma"]))
-        XCTAssertFalse(plans.first(where: { $0.sourceFolderName == "Beta" })?.detail?.contains("Project root prefetch requested.") ?? false)
+        XCTAssertFalse(plans.first(where: { $0.sourceFolderName == "Beta" })?.detail?.contains("Project directory warmup requested.") ?? false)
     }
 
     private func makeConfiguration(
         sourceRoot: URL,
         destinationRoot: URL,
-        shouldCreateArchive: Bool = false
+        shouldCreateArchive: Bool = false,
+        orderingMode: BatchOrderingMode = .alphabetical
     ) -> BatchConfiguration {
         BatchConfiguration(
             batchID: UUID(),
             sourceRootURL: sourceRoot,
             destinationRootURL: destinationRoot,
+            orderingMode: orderingMode,
             suffix: "Lokal",
             transferPolicy: .exactCopy,
             priorityPolicy: TransferPriorityPolicy(mode: .criticalFirst),

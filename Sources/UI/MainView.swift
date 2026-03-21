@@ -2,7 +2,6 @@ import SwiftUI
 
 struct MainView: View {
     @State private var viewModel = MainViewModel()
-    @State private var now = Date()
 
     var body: some View {
         ScrollView {
@@ -13,12 +12,6 @@ struct MainView: View {
             .padding(20)
         }
         .frame(minWidth: 1280, minHeight: 920)
-        .task {
-            while !Task.isCancelled {
-                now = Date()
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
         .onChange(of: viewModel.runMode, initial: true) { _, _ in
             viewModel.rebuildBatchPreview()
         }
@@ -60,18 +53,16 @@ struct MainView: View {
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
-                if let runHealth = viewModel.runHealthState(now: now) {
-                    Text(runHealth.message)
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(runHealthColor(for: runHealth.level))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                runHealthRow
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 8) {
                 phaseBadge(for: viewModel.snapshot.phase)
                 Text(etaText)
                     .font(.system(.headline, design: .rounded))
+                Text(AppVersion.displayText())
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -160,6 +151,18 @@ struct MainView: View {
                                 viewModel.rebuildBatchPreview()
                             }
                         Text(viewModel.batchNamingPreviewText)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Picker("Batch Order", selection: $viewModel.batchOrderingMode) {
+                            ForEach(BatchOrderingMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        .disabled(viewModel.isRunning)
+
+                        Text(viewModel.batchOrderingDetail)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -282,15 +285,40 @@ struct MainView: View {
                 .frame(width: 360, alignment: .leading)
             }
 
+            GroupBox("Rescue Profile") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Profile", selection: $viewModel.rescueProfile) {
+                        ForEach(RescueProfile.allCases) { profile in
+                            Text(profile.title).tag(profile)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(viewModel.isRunning)
+
+                    Text(viewModel.rescueProfileDetail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(viewModel.rescueProfileSummary)
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(viewModel.rescueProfile == .aggressive ? .orange : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(width: 360, alignment: .leading)
+            }
+
             GroupBox("Controls") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Stepper("Workers: \(viewModel.workerCount)", value: $viewModel.workerCount, in: 1...4)
+                    Stepper("Workers: \(viewModel.workerCount)", value: $viewModel.workerCount, in: viewModel.workerRange)
                         .disabled(viewModel.isRunning)
-                    Stepper("Hydration Window: \(viewModel.hydrationWindow)", value: $viewModel.hydrationWindow, in: 2...8)
+                    Stepper("Hydration Window: \(viewModel.hydrationWindow)", value: $viewModel.hydrationWindow, in: viewModel.hydrationRange)
                         .disabled(viewModel.isRunning)
                     Stepper("Retries: \(viewModel.retryCount)", value: $viewModel.retryCount, in: 1...6)
                         .disabled(viewModel.isRunning)
-                    Text("The rescue now starts conservatively: fewer workers, smaller hydration windows, no blind project prewarm, and no automatic ZIP in the critical path.")
+                    Text(viewModel.rescueProfile == .aggressive
+                        ? "Aggressive rescue raises worker and hydration budgets, enables upcoming-project prewarm, walks deeper into subdirectories to trigger iCloud hydration, and may hit CPU, disk, and iCloud harder. ZIP still stays out of the critical path."
+                        : "The rescue starts conservatively: fewer workers, smaller hydration windows, no blind project prewarm, and no automatic ZIP in the critical path.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -304,6 +332,25 @@ struct MainView: View {
                     }
                     Button("Export Log") { viewModel.exportLog() }
                         .disabled(viewModel.logs.isEmpty)
+                    Divider()
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Session Log")
+                            .font(.subheadline.weight(.semibold))
+                        Text(viewModel.sessionLogPath)
+                            .font(.system(.caption2, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("Latest pointer: \(viewModel.latestLogPath)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Button("Reveal Log") { viewModel.revealCurrentLog() }
+                            Button("Open Log Folder") { viewModel.openLogFolder() }
+                        }
+                    }
                     if let error = viewModel.errorText {
                         Text(error)
                             .font(.footnote)
@@ -333,9 +380,15 @@ struct MainView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
+                    if viewModel.hiddenBatchProjectCount > 0 {
+                        Text("Showing \(viewModel.visibleBatchProjects.count) of \(viewModel.batchProjects.count) projects to keep the live queue responsive.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 10) {
-                            ForEach(viewModel.batchProjects) { project in
+                            ForEach(viewModel.visibleBatchProjects) { project in
                                 batchProjectRow(project)
                             }
                         }
@@ -402,13 +455,19 @@ struct MainView: View {
                         Text("No failures recorded.")
                             .foregroundStyle(.secondary)
                     } else {
-                        List(viewModel.failures) { failure in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(failure.relativePath)
-                                    .font(.system(.body, design: .monospaced))
-                                Text("\(failure.reason.rawValue): \(failure.message)")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 10) {
+                                ForEach(viewModel.failures) { failure in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(failure.relativePath)
+                                            .font(.system(.body, design: .monospaced))
+                                        Text("\(failure.reason.rawValue): \(failure.message)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Divider()
+                                        .padding(.top, 2)
+                                }
                             }
                         }
                     }
@@ -440,12 +499,22 @@ struct MainView: View {
                     }
                     .onChange(of: viewModel.logs.count, initial: false) { _, _ in
                         guard let lastID = viewModel.logs.last?.id else { return }
-                        withAnimation(.easeOut(duration: 0.15)) {
-                            proxy.scrollTo(lastID, anchor: .bottom)
-                        }
+                        proxy.scrollTo(lastID, anchor: .bottom)
                     }
                 }
                 .frame(minHeight: 220)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var runHealthRow: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            if let runHealth = viewModel.runHealthState(now: context.date) {
+                Text(runHealth.message)
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(runHealthColor(for: runHealth.level))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -775,19 +844,12 @@ struct MainView: View {
     }
 
     private func formattedBytes(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useMB, .useGB, .useTB]
-        formatter.countStyle = .file
-        formatter.includesUnit = true
-        return formatter.string(fromByteCount: bytes)
+        MainViewFormatters.byteCount.string(fromByteCount: bytes)
     }
 
     private func formattedDuration(_ seconds: Double) -> String {
         guard seconds.isFinite else { return "Calculating" }
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = seconds >= 3600 ? [.hour, .minute] : [.minute, .second]
-        formatter.unitsStyle = .abbreviated
-        formatter.zeroFormattingBehavior = [.dropLeading]
+        let formatter = seconds >= 3600 ? MainViewFormatters.longDuration : MainViewFormatters.shortDuration
         return formatter.string(from: max(seconds, 0)) ?? "0s"
     }
 
@@ -801,9 +863,7 @@ struct MainView: View {
     }
 
     private func timestamp(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        return formatter.string(from: date)
+        MainViewFormatters.timestamp.string(from: date)
     }
 
     private func phaseColor(for phase: JobPhase) -> Color {
@@ -904,4 +964,37 @@ struct MainView: View {
             return .idle
         }
     }
+}
+
+@MainActor
+private enum MainViewFormatters {
+    static let byteCount: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB, .useTB]
+        formatter.countStyle = .file
+        formatter.includesUnit = true
+        return formatter
+    }()
+
+    static let shortDuration: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.minute, .second]
+        formatter.unitsStyle = .abbreviated
+        formatter.zeroFormattingBehavior = [.dropLeading]
+        return formatter
+    }()
+
+    static let longDuration: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.hour, .minute]
+        formatter.unitsStyle = .abbreviated
+        formatter.zeroFormattingBehavior = [.dropLeading]
+        return formatter
+    }()
+
+    static let timestamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 }

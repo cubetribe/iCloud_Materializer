@@ -20,6 +20,8 @@ targets:
           - Pipeline/JobRunner.swift
           - Planning
           - Support
+      - path: VERSION
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.denniswestermann.iCloudMaterializer

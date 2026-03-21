@@ -2,6 +2,7 @@ import Foundation
 
 actor AppLogger {
     private var entries: [LogEntry] = []
+    private let sessionLog = AppSessionLog.shared
 
     func append(level: LogLevel, message: String, path: String? = nil) -> LogEntry {
         let entry = LogEntry(
@@ -12,6 +13,7 @@ actor AppLogger {
             path: path
         )
         entries.append(entry)
+        sessionLog.append(entry: entry)
         return entry
     }
 

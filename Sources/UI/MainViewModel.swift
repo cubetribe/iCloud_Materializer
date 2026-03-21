@@ -1,12 +1,33 @@
+import AppKit
 import Foundation
 import Observation
 
 @MainActor
 @Observable
 final class MainViewModel {
+    private static let maxLogEntries = 250
+    private static let maxVisibleBatchProjects = 40
+    private static let batchProjectLeadCount = 6
+    private static let batchProjectContextRadius = 6
+    private static let batchProjectTailCount = 6
+
     var sourceURL: URL?
     var destinationURL: URL?
     var runMode: RunMode = .singleProject
+    var batchOrderingMode: BatchOrderingMode = .newestFirst {
+        didSet {
+            guard batchOrderingMode != oldValue else { return }
+            rebuildBatchPreview()
+        }
+    }
+    var rescueProfile: RescueProfile = .conservative {
+        didSet {
+            guard rescueProfile != oldValue else { return }
+            applyRescueProfileDefaults(rescueProfile)
+            refreshPreflight()
+            rebuildBatchPreview()
+        }
+    }
     var transferMode: TransferMode = .exactCopy
     var priorityMode: TransferPriorityMode = .criticalFirst
     var batchNamingMode: BatchNamingMode = .suffix
@@ -22,9 +43,9 @@ final class MainViewModel {
     var logs: [LogEntry] = []
     var failures: [FailureRecord] = []
     var pendingConflict: PromotionConflictState?
-    var workerCount: Int = 2
-    var hydrationWindow: Int = 4
-    var retryCount: Int = 2
+    var workerCount: Int = RescueProfile.conservative.defaultWorkerCount
+    var hydrationWindow: Int = RescueProfile.conservative.defaultHydrationWindow
+    var retryCount: Int = RescueProfile.conservative.defaultRetryCount
     var isPaused = false
     private(set) var lastProgressAt: Date?
 
@@ -33,7 +54,6 @@ final class MainViewModel {
     private let preflightEngine = PreflightEngine()
     private var pauseController: PauseController?
     private var jobTask: Task<Void, Never>?
-    private let maxLogEntries = 400
 
     var isRunning: Bool {
         if batchSnapshot.state == .running {
@@ -55,6 +75,38 @@ final class MainViewModel {
         batchSnapshot.lastError ?? snapshot.lastError
     }
 
+    var sessionLogPath: String {
+        AppSessionLog.shared.sessionLogURL.path
+    }
+
+    var latestLogPath: String {
+        AppSessionLog.shared.latestLogURL.path
+    }
+
+    var visibleBatchProjects: [BatchProjectPlan] {
+        guard batchProjects.count > Self.maxVisibleBatchProjects else {
+            return batchProjects
+        }
+
+        let currentIndex = max((batchSnapshot.currentProjectIndex ?? 1) - 1, 0)
+        let lead = Array(batchProjects.prefix(Self.batchProjectLeadCount))
+        let contextStart = max(0, currentIndex - Self.batchProjectContextRadius)
+        let contextEnd = min(batchProjects.count, currentIndex + Self.batchProjectContextRadius + 1)
+        let context = Array(batchProjects[contextStart..<contextEnd])
+        let tail = Array(batchProjects.suffix(Self.batchProjectTailCount))
+
+        var visible: [BatchProjectPlan] = []
+        var seen: Set<UUID> = []
+        for project in lead + context + tail where seen.insert(project.id).inserted {
+            visible.append(project)
+        }
+        return visible
+    }
+
+    var hiddenBatchProjectCount: Int {
+        max(0, batchProjects.count - visibleBatchProjects.count)
+    }
+
     func runHealthState(now: Date) -> RunHealthState? {
         RunHealthState.evaluate(isRunning: isRunning, lastProgressAt: lastProgressAt, now: now)
     }
@@ -69,6 +121,41 @@ final class MainViewModel {
 
     var priorityPolicy: TransferPriorityPolicy {
         TransferPriorityPolicy(mode: priorityMode)
+    }
+
+    var workerRange: ClosedRange<Int> {
+        rescueProfile.workerRange
+    }
+
+    var hydrationRange: ClosedRange<Int> {
+        rescueProfile.hydrationRange
+    }
+
+    var currentHydrationPrefetchWindow: Int {
+        rescueProfile.hydrationPrefetchWindow
+    }
+
+    var currentProjectPrefetchWindow: Int {
+        rescueProfile.projectPrefetchWindow
+    }
+
+    var rescueProfileSummary: String {
+        let batchPrefetch = currentProjectPrefetchWindow == 0
+            ? "batch prewarm off"
+            : "batch prewarm \(currentProjectPrefetchWindow) project(s) ahead"
+        let hydrationLookahead = currentHydrationPrefetchWindow == 0
+            ? "hydration lookahead off"
+            : "hydration lookahead \(currentHydrationPrefetchWindow)"
+        let directoryWarmup = rescueProfile == .aggressive ? "deep directory warmup on" : "directory warmup modest"
+        return "\(clampedWorkerCount) workers, hydration window \(clampedHydrationWindow), \(batchPrefetch), \(hydrationLookahead), \(directoryWarmup)."
+    }
+
+    var rescueProfileDetail: String {
+        rescueProfile.subtitle
+    }
+
+    var batchOrderingDetail: String {
+        batchOrderingMode.subtitle
     }
 
     var batchNamingFieldPrompt: String {
@@ -88,15 +175,18 @@ final class MainViewModel {
             sourceRootURL: URL(fileURLWithPath: "/tmp/source-root", isDirectory: true),
             destinationRootURL: URL(fileURLWithPath: "/tmp/destination-root", isDirectory: true),
             namingMode: batchNamingMode,
+            orderingMode: batchOrderingMode,
             suffix: batchSuffix,
+            rescueProfile: rescueProfile,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
-            workerCount: 4,
-            hydrationWindow: 4,
-            retryCount: 1,
-            backoffSchedule: [.seconds(0)],
+            workerCount: rescueProfile.defaultWorkerCount,
+            hydrationWindow: rescueProfile.defaultHydrationWindow,
+            retryCount: rescueProfile.defaultRetryCount,
+            backoffSchedule: rescueProfile.backoffSchedule,
             maxHydrationWait: .seconds(1),
-            hydrationPrefetchWindow: 0,
+            hydrationPrefetchWindow: rescueProfile.hydrationPrefetchWindow,
+            hydrationHotSlotDuration: rescueProfile.hydrationHotSlotDuration,
             enableFinderFallback: false
         )
         let sample = configuration.targetFolderName(for: "ExampleProject")
@@ -109,15 +199,18 @@ final class MainViewModel {
             sourceRootURL: URL(fileURLWithPath: "/tmp/source-root", isDirectory: true),
             destinationRootURL: URL(fileURLWithPath: "/tmp/destination-root", isDirectory: true),
             namingMode: batchNamingMode,
+            orderingMode: batchOrderingMode,
             suffix: batchSuffix,
+            rescueProfile: rescueProfile,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
-            workerCount: 4,
-            hydrationWindow: 4,
-            retryCount: 1,
-            backoffSchedule: [.seconds(0)],
+            workerCount: rescueProfile.defaultWorkerCount,
+            hydrationWindow: rescueProfile.defaultHydrationWindow,
+            retryCount: rescueProfile.defaultRetryCount,
+            backoffSchedule: rescueProfile.backoffSchedule,
             maxHydrationWait: .seconds(1),
-            hydrationPrefetchWindow: 0,
+            hydrationPrefetchWindow: rescueProfile.hydrationPrefetchWindow,
+            hydrationHotSlotDuration: rescueProfile.hydrationHotSlotDuration,
             enableFinderFallback: false
         )
         return configuration.namingSummary
@@ -146,11 +239,21 @@ final class MainViewModel {
     func start() {
         guard let sourceURL, let destinationURL else {
             snapshot.lastError = PipelineError.missingFolderSelection.localizedDescription
+            AppSessionLog.shared.append(
+                level: .error,
+                category: "ui",
+                message: "Start blocked because source or destination is missing"
+            )
             return
         }
         refreshPreflight()
         guard preflightReport.canStart else {
             snapshot.lastError = preflightReport.blockingSummary ?? "Resolve the required preflight checks before starting."
+            AppSessionLog.shared.append(
+                level: .warning,
+                category: "ui",
+                message: "Start blocked by preflight: \(snapshot.lastError ?? "unknown preflight issue")"
+            )
             return
         }
 
@@ -159,6 +262,12 @@ final class MainViewModel {
             let existingTarget = destinationURL.appendingPathComponent(sourceURL.lastPathComponent, isDirectory: true)
             if FileManager.default.fileExists(atPath: existingTarget.path) {
                 pendingConflict = PromotionConflictState(existingTarget: existingTarget)
+                AppSessionLog.shared.append(
+                    level: .warning,
+                    category: "ui",
+                    message: "Start paused because destination already exists",
+                    path: existingTarget.path
+                )
                 return
             }
             startSingleRun(sourceURL: sourceURL, destinationURL: destinationURL, allowTargetQuarantine: false)
@@ -170,6 +279,11 @@ final class MainViewModel {
     func startAfterQuarantineApproval() {
         pendingConflict = nil
         guard let sourceURL, let destinationURL else { return }
+        AppSessionLog.shared.append(
+            level: .warning,
+            category: "ui",
+            message: "User approved quarantine of existing destination before retry"
+        )
         startSingleRun(sourceURL: sourceURL, destinationURL: destinationURL, allowTargetQuarantine: true)
     }
 
@@ -179,15 +293,18 @@ final class MainViewModel {
             if isPaused {
                 await pauseController.resume()
                 isPaused = false
+                AppSessionLog.shared.append(level: .info, category: "ui", message: "Run resumed by user")
             } else {
                 await pauseController.pause()
                 isPaused = true
+                AppSessionLog.shared.append(level: .warning, category: "ui", message: "Run paused by user")
             }
         }
     }
 
     func cancel() {
         guard let pauseController else { return }
+        AppSessionLog.shared.append(level: .warning, category: "ui", message: "Cancellation requested by user")
         Task {
             await pauseController.cancel()
         }
@@ -205,9 +322,28 @@ final class MainViewModel {
                 String(decoding: try encoder.encode(entry), as: UTF8.self)
             }
             try lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+            AppSessionLog.shared.append(
+                level: .info,
+                category: "ui",
+                message: "User exported in-memory log snapshot",
+                path: url.path
+            )
         } catch {
             snapshot.lastError = error.localizedDescription
+            AppSessionLog.shared.append(
+                level: .error,
+                category: "ui",
+                message: "Exporting in-memory log snapshot failed: \(error.localizedDescription)"
+            )
         }
+    }
+
+    func revealCurrentLog() {
+        NSWorkspace.shared.activateFileViewerSelecting([AppSessionLog.shared.sessionLogURL])
+    }
+
+    func openLogFolder() {
+        NSWorkspace.shared.open(AppSessionLog.shared.directoryURL)
     }
 
     func setPreflightConfirmation(id: String, isConfirmed: Bool) {
@@ -272,40 +408,63 @@ final class MainViewModel {
             sourceURL: sourceURL,
             destinationURL: destinationURL,
             preflightReport: preflightReport,
+            rescueProfile: rescueProfile,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
-            workerCount: max(1, min(workerCount, 4)),
-            hydrationWindow: max(2, min(hydrationWindow, 8)),
+            workerCount: clampedWorkerCount,
+            hydrationWindow: clampedHydrationWindow,
             retryCount: max(1, retryCount),
-            backoffSchedule: [.seconds(0), .seconds(2), .seconds(5), .seconds(15)],
+            backoffSchedule: rescueProfile.backoffSchedule,
             maxHydrationWait: .seconds(300),
             shouldCreateArchive: false,
-            hydrationPrefetchWindow: 0,
-            hydrationHotSlotDuration: .seconds(6),
+            hydrationPrefetchWindow: currentHydrationPrefetchWindow,
+            hydrationHotSlotDuration: rescueProfile.hydrationHotSlotDuration,
             allowTargetQuarantine: allowTargetQuarantine,
             enableFinderFallback: true
         )
+        AppSessionLog.shared.append(
+            level: .info,
+            category: "job",
+            message: "Starting single rescue run",
+            path: sourceURL.path
+        )
         prepareForRun(sourceURL: sourceURL, destinationURL: destinationURL)
         snapshot.jobID = configuration.jobID
+        let relay = ViewUpdateRelay { [weak self] updates in
+            guard let self else { return }
+            await self.consume(buffered: updates)
+        }
         jobTask = Task {
             await coordinator.run(configuration: configuration, pauseController: pauseController!) { [weak self] update in
-                guard let self else { return }
-                await self.consume(update: update)
+                guard self != nil else { return }
+                await relay.enqueue(update)
             }
+            await relay.flush()
         }
     }
 
     private func startBatchRun(sourceURL: URL, destinationURL: URL) {
         let configuration = makeBatchConfiguration(sourceURL: sourceURL, destinationURL: destinationURL)
+        AppSessionLog.shared.append(
+            level: .info,
+            category: "batch",
+            message: "Starting batch rescue run with order \(batchOrderingMode.title)",
+            path: sourceURL.path
+        )
         prepareForRun(sourceURL: sourceURL, destinationURL: destinationURL)
         batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchNamingSummary)
         batchSnapshot.batchID = configuration.batchID
         batchProjects = []
+        let relay = ViewUpdateRelay { [weak self] updates in
+            guard let self else { return }
+            await self.consume(buffered: updates)
+        }
         jobTask = Task {
             await batchCoordinator.run(configuration: configuration, pauseController: pauseController!) { [weak self] update in
-                guard let self else { return }
-                await self.consume(update: update)
+                guard self != nil else { return }
+                await relay.enqueue(update)
             }
+            await relay.flush()
         }
     }
 
@@ -315,18 +474,21 @@ final class MainViewModel {
             sourceRootURL: sourceURL,
             destinationRootURL: destinationURL,
             namingMode: batchNamingMode,
+            orderingMode: batchOrderingMode,
             suffix: batchSuffix,
+            rescueProfile: rescueProfile,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
-            workerCount: max(1, min(workerCount, 4)),
-            hydrationWindow: max(2, min(hydrationWindow, 8)),
+            workerCount: clampedWorkerCount,
+            hydrationWindow: clampedHydrationWindow,
             retryCount: max(1, retryCount),
-            backoffSchedule: [.seconds(0), .seconds(2), .seconds(5), .seconds(15)],
+            backoffSchedule: rescueProfile.backoffSchedule,
             maxHydrationWait: .seconds(300),
             shouldCreateArchive: false,
-            hydrationPrefetchWindow: 0,
+            hydrationPrefetchWindow: currentHydrationPrefetchWindow,
+            hydrationHotSlotDuration: rescueProfile.hydrationHotSlotDuration,
             enableFinderFallback: true,
-            projectPrefetchWindow: 0
+            projectPrefetchWindow: currentProjectPrefetchWindow
         )
     }
 
@@ -342,6 +504,27 @@ final class MainViewModel {
         lastProgressAt = Date()
     }
 
+    private func consume(buffered updates: BufferedJobUpdates) {
+        if let snapshot = updates.snapshot {
+            consume(update: .snapshot(snapshot))
+        }
+        for entry in updates.logs {
+            consume(update: .log(entry))
+        }
+        if let failures = updates.failures {
+            consume(update: .failures(failures))
+        }
+        if let activities = updates.activities {
+            consume(update: .activities(activities))
+        }
+        if let snapshot = updates.batchSnapshot {
+            consume(update: .batchSnapshot(snapshot))
+        }
+        if let projects = updates.batchProjects {
+            consume(update: .batchProjects(projects))
+        }
+    }
+
     private func consume(update: JobUpdate) {
         switch update {
         case .snapshot(let snapshot):
@@ -352,8 +535,8 @@ final class MainViewModel {
         case .log(let entry):
             lastProgressAt = entry.createdAt
             logs.append(entry)
-            if logs.count > maxLogEntries {
-                logs.removeFirst(logs.count - maxLogEntries)
+            if logs.count > Self.maxLogEntries {
+                logs.removeFirst(logs.count - Self.maxLogEntries)
             }
         case .failures(let failures):
             if !failures.isEmpty {
@@ -401,6 +584,20 @@ final class MainViewModel {
         )
     }
 
+    private var clampedWorkerCount: Int {
+        min(max(workerCount, workerRange.lowerBound), workerRange.upperBound)
+    }
+
+    private var clampedHydrationWindow: Int {
+        min(max(hydrationWindow, hydrationRange.lowerBound), hydrationRange.upperBound)
+    }
+
+    private func applyRescueProfileDefaults(_ profile: RescueProfile) {
+        workerCount = profile.defaultWorkerCount
+        hydrationWindow = profile.defaultHydrationWindow
+        retryCount = profile.defaultRetryCount
+    }
+
     private func snapshotHasProgress(from old: JobSnapshot, to new: JobSnapshot) -> Bool {
         old.phase != new.phase ||
         old.phaseDetail != new.phaseDetail ||
@@ -428,5 +625,90 @@ final class MainViewModel {
         old.currentProjectName != new.currentProjectName ||
         old.finishedAt != new.finishedAt ||
         old.lastError != new.lastError
+    }
+}
+
+private struct BufferedJobUpdates: Sendable {
+    var snapshot: JobSnapshot?
+    var logs: [LogEntry] = []
+    var failures: [FailureRecord]?
+    var activities: [WorkerActivity]?
+    var batchSnapshot: BatchSnapshot?
+    var batchProjects: [BatchProjectPlan]?
+
+    var isEmpty: Bool {
+        snapshot == nil &&
+        logs.isEmpty &&
+        failures == nil &&
+        activities == nil &&
+        batchSnapshot == nil &&
+        batchProjects == nil
+    }
+
+    mutating func merge(_ update: JobUpdate) {
+        switch update {
+        case .snapshot(let snapshot):
+            self.snapshot = snapshot
+        case .log(let entry):
+            logs.append(entry)
+        case .failures(let failures):
+            self.failures = failures
+        case .activities(let activities):
+            self.activities = activities
+        case .batchSnapshot(let snapshot):
+            self.batchSnapshot = snapshot
+        case .batchProjects(let projects):
+            self.batchProjects = projects
+        }
+    }
+}
+
+private actor ViewUpdateRelay {
+    private let flushInterval: Duration
+    private let apply: @Sendable (BufferedJobUpdates) async -> Void
+    private var pending = BufferedJobUpdates()
+    private var flushTask: Task<Void, Never>?
+
+    init(
+        flushInterval: Duration = .milliseconds(200),
+        apply: @escaping @Sendable (BufferedJobUpdates) async -> Void
+    ) {
+        self.flushInterval = flushInterval
+        self.apply = apply
+    }
+
+    func enqueue(_ update: JobUpdate) {
+        pending.merge(update)
+        scheduleFlushIfNeeded()
+    }
+
+    func flush() async {
+        flushTask?.cancel()
+        flushTask = nil
+        let updates = pending
+        pending = BufferedJobUpdates()
+        guard !updates.isEmpty else { return }
+        await apply(updates)
+    }
+
+    private func scheduleFlushIfNeeded() {
+        guard flushTask == nil else { return }
+
+        let flushInterval = self.flushInterval
+        let apply = self.apply
+        flushTask = Task { [weak self] in
+            try? await Task.sleep(for: flushInterval)
+            guard let self else { return }
+            let updates = await self.takePendingUpdates()
+            guard !updates.isEmpty else { return }
+            await apply(updates)
+        }
+    }
+
+    private func takePendingUpdates() -> BufferedJobUpdates {
+        flushTask = nil
+        let updates = pending
+        pending = BufferedJobUpdates()
+        return updates
     }
 }

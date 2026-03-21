@@ -11,7 +11,7 @@ final class BatchCoordinator: @unchecked Sendable {
         projectPrefetcher: @escaping @Sendable (URL, TransferPolicy, Int) async -> Void = { url, transferPolicy, scanDepth in
             let fileManager = FileManager.default
             let resourceKeys: Set<URLResourceKey> = [.isDirectoryKey, .isUbiquitousItemKey]
-            let childLimit = min(max(scanDepth, 1), 32)
+            let childLimit = BatchCoordinator.prefetchCandidateLimit(scanDepth: scanDepth)
             let candidates = BatchCoordinator.prefetchCandidateURLs(
                 projectURL: url,
                 transferPolicy: transferPolicy,
@@ -44,36 +44,54 @@ final class BatchCoordinator: @unchecked Sendable {
         var candidates: [URL] = [projectURL]
         guard childLimit > 0 else { return candidates }
 
-        guard let children = try? fileManager.contentsOfDirectory(
-            at: projectURL,
-            includingPropertiesForKeys: Array(resourceKeys),
-            options: [.skipsPackageDescendants]
-        ) else {
-            return candidates
-        }
-
-        let sortedChildren = children.sorted { lhs, rhs in
-            let lhsValues = try? lhs.resourceValues(forKeys: resourceKeys)
-            let rhsValues = try? rhs.resourceValues(forKeys: resourceKeys)
-            let lhsIsDirectory = lhsValues?.isDirectory ?? false
-            let rhsIsDirectory = rhsValues?.isDirectory ?? false
-            if lhsIsDirectory != rhsIsDirectory {
-                return lhsIsDirectory && !rhsIsDirectory
-            }
-            return lhs.lastPathComponent.localizedCaseInsensitiveCompare(rhs.lastPathComponent) == .orderedAscending
-        }
-
-        for child in sortedChildren {
-            guard candidates.count < childLimit + 1 else { break }
-            let values = try? child.resourceValues(forKeys: resourceKeys)
-            let kind: ItemKind = (values?.isDirectory == true) ? .directory : .file
-            guard transferPolicy.scanDecision(relativePath: child.lastPathComponent, kind: kind) == .include else {
+        var queue: [URL] = [projectURL]
+        while !queue.isEmpty, candidates.count < childLimit + 1 {
+            let directoryURL = queue.removeFirst()
+            guard let children = try? fileManager.contentsOfDirectory(
+                at: directoryURL,
+                includingPropertiesForKeys: Array(resourceKeys),
+                options: [.skipsPackageDescendants]
+            ) else {
                 continue
             }
-            candidates.append(child)
+
+            let sortedChildren = children.sorted { lhs, rhs in
+                let lhsValues = try? lhs.resourceValues(forKeys: resourceKeys)
+                let rhsValues = try? rhs.resourceValues(forKeys: resourceKeys)
+                let lhsIsDirectory = lhsValues?.isDirectory ?? false
+                let rhsIsDirectory = rhsValues?.isDirectory ?? false
+                if lhsIsDirectory != rhsIsDirectory {
+                    return lhsIsDirectory && !rhsIsDirectory
+                }
+                return lhs.lastPathComponent.localizedCaseInsensitiveCompare(rhs.lastPathComponent) == .orderedAscending
+            }
+
+            for child in sortedChildren {
+                guard candidates.count < childLimit + 1 else { break }
+                let values = try? child.resourceValues(forKeys: resourceKeys)
+                let isDirectory = values?.isDirectory == true
+                let kind: ItemKind = isDirectory ? .directory : .file
+                let relativePath = normalizedRelativePath(for: child, rootURL: projectURL)
+                switch transferPolicy.scanDecision(relativePath: relativePath, kind: kind) {
+                case .include:
+                    candidates.append(child)
+                    if isDirectory {
+                        queue.append(child)
+                    }
+                case .excludeItem:
+                    continue
+                case .excludeDescendants:
+                    continue
+                }
+            }
         }
 
         return candidates
+    }
+
+    static func prefetchCandidateLimit(scanDepth: Int) -> Int {
+        let depth = max(scanDepth, 1)
+        return min(max(depth * 6, 24), 256)
     }
 
     func preview(configuration: BatchConfiguration) throws -> (snapshot: BatchSnapshot, projects: [BatchProjectPlan]) {
@@ -155,6 +173,12 @@ final class BatchCoordinator: @unchecked Sendable {
                 let projectName = projects[index].sourceFolderName
                 let projectConfiguration = configuration.jobConfiguration(for: projects[index])
                 let materializer = coordinatorFactory()
+                AppSessionLog.shared.append(
+                    level: .info,
+                    category: "batch",
+                    message: "Starting batch project \(projectName)",
+                    path: projects[index].sourceURL.path
+                )
 
                 await materializer.run(
                     configuration: projectConfiguration,
@@ -174,6 +198,12 @@ final class BatchCoordinator: @unchecked Sendable {
                 switch outcome.phase {
                 case .completed:
                     projects[index].state = .completed
+                    AppSessionLog.shared.append(
+                        level: .info,
+                        category: "batch",
+                        message: "Batch project completed: \(projectName)",
+                        path: projects[index].targetURL.path
+                    )
                     try prepareDeletionManifestIfPossible(
                         for: &projects[index],
                         configuration: configuration,
@@ -181,6 +211,12 @@ final class BatchCoordinator: @unchecked Sendable {
                     )
                 case .completedWithWarnings:
                     projects[index].state = .completedWithWarnings
+                    AppSessionLog.shared.append(
+                        level: .warning,
+                        category: "batch",
+                        message: "Batch project completed with warnings: \(projectName)",
+                        path: projects[index].targetURL.path
+                    )
                     try prepareDeletionManifestIfPossible(
                         for: &projects[index],
                         configuration: configuration,
@@ -188,6 +224,12 @@ final class BatchCoordinator: @unchecked Sendable {
                     )
                 case .cancelled:
                     projects[index].state = .cancelled
+                    AppSessionLog.shared.append(
+                        level: .warning,
+                        category: "batch",
+                        message: "Batch project cancelled: \(projectName)",
+                        path: projects[index].sourceURL.path
+                    )
                     let cancelledSnapshot = snapshot(
                         for: projects,
                         configuration: configuration,
@@ -202,6 +244,12 @@ final class BatchCoordinator: @unchecked Sendable {
                     return
                 default:
                     projects[index].state = .failed
+                    AppSessionLog.shared.append(
+                        level: .error,
+                        category: "batch",
+                        message: "Batch project failed: \(projectName). \(outcome.lastError ?? outcome.phaseDetail ?? "No detail")",
+                        path: projects[index].sourceURL.path
+                    )
                 }
 
                 let loopSnapshot = snapshot(
@@ -225,10 +273,22 @@ final class BatchCoordinator: @unchecked Sendable {
                 finishedAt: Date(),
                 lastError: lastError
             )
+            AppSessionLog.shared.append(
+                level: finalState == .completed ? .info : .warning,
+                category: "batch",
+                message: "Batch run finished with state \(finalState.rawValue)",
+                path: configuration.sourceRootURL.path
+            )
             try savePersistedRun(snapshot: finalSnapshot, projects: projects, configuration: configuration)
             await onUpdate(.batchProjects(projects))
             await onUpdate(.batchSnapshot(finalSnapshot))
         } catch is CancellationError {
+            AppSessionLog.shared.append(
+                level: .warning,
+                category: "batch",
+                message: "Batch run cancelled",
+                path: configuration.sourceRootURL.path
+            )
             let cancelledSnapshot = snapshot(
                 for: projects,
                 configuration: configuration,
@@ -241,6 +301,12 @@ final class BatchCoordinator: @unchecked Sendable {
             await onUpdate(.batchProjects(projects))
             await onUpdate(.batchSnapshot(cancelledSnapshot))
         } catch {
+            AppSessionLog.shared.append(
+                level: .error,
+                category: "batch",
+                message: "Batch run failed: \(error.localizedDescription)",
+                path: configuration.sourceRootURL.path
+            )
             let failedSnapshot = snapshot(
                 for: projects,
                 configuration: configuration,
@@ -258,25 +324,32 @@ final class BatchCoordinator: @unchecked Sendable {
     private func freshProjects(configuration: BatchConfiguration) throws -> [BatchProjectPlan] {
         let childURLs = try fileManager.contentsOfDirectory(
             at: configuration.sourceRootURL,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey, .attributeModificationDateKey, .creationDateKey],
             options: [.skipsPackageDescendants]
         )
 
         let projectRoots = try childURLs
             .filter { $0.lastPathComponent != ".icloud-materializer" && $0.lastPathComponent != "_Materializer_Archives" }
-            .filter { url in
-                let values = try url.resourceValues(forKeys: [.isDirectoryKey])
-                return values.isDirectory == true
+            .compactMap { url -> ProjectRootDescriptor? in
+                let values = try url.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey, .attributeModificationDateKey, .creationDateKey])
+                guard values.isDirectory == true else {
+                    return nil
+                }
+                return ProjectRootDescriptor(
+                    url: url,
+                    activityDate: projectActivityDate(from: values)
+                )
             }
             .sorted { lhs, rhs in
-                lhs.lastPathComponent.localizedCaseInsensitiveCompare(rhs.lastPathComponent) == .orderedAscending
+                compareProjectRoots(lhs, rhs, orderingMode: configuration.orderingMode)
             }
 
         guard !projectRoots.isEmpty else {
             throw PipelineError.invalidBatchSource("No direct subfolders were found in the selected batch source root.")
         }
 
-        return projectRoots.map { projectURL in
+        return projectRoots.map { descriptor in
+            let projectURL = descriptor.url
             let targetFolderName = configuration.targetFolderName(for: projectURL.lastPathComponent)
             let targetURL = configuration.destinationRootURL.appendingPathComponent(targetFolderName, isDirectory: true)
             let hasConflict = fileManager.fileExists(atPath: targetURL.path)
@@ -397,7 +470,7 @@ final class BatchCoordinator: @unchecked Sendable {
             let prefetchDepth = configuration.jobConfiguration(for: projects[nextIndex]).localPrefetchScanDepth
             await projectPrefetcher(projects[nextIndex].sourceURL, configuration.transferPolicy, prefetchDepth)
             prefetchedProjectSourcePaths.insert(projects[nextIndex].sourceURL.standardizedFileURL.path)
-            let hint = "Project root prefetch requested."
+            let hint = "Project directory warmup requested."
             if projects[nextIndex].detail?.contains(hint) != true {
                 projects[nextIndex].detail = [projects[nextIndex].detail, hint]
                     .compactMap { $0 }
@@ -424,9 +497,50 @@ final class BatchCoordinator: @unchecked Sendable {
         let sanitizedLines = detail
             .split(separator: "\n")
             .map(String.init)
-            .filter { $0 != "Project root prefetch requested." }
+            .filter {
+                $0 != "Project root prefetch requested." &&
+                $0 != "Project directory warmup requested."
+            }
         guard !sanitizedLines.isEmpty else { return nil }
         return sanitizedLines.joined(separator: "\n")
+    }
+
+    private func compareProjectRoots(
+        _ lhs: ProjectRootDescriptor,
+        _ rhs: ProjectRootDescriptor,
+        orderingMode: BatchOrderingMode
+    ) -> Bool {
+        switch orderingMode {
+        case .alphabetical:
+            return lhs.url.lastPathComponent.localizedCaseInsensitiveCompare(rhs.url.lastPathComponent) == .orderedAscending
+        case .newestFirst:
+            if lhs.activityDate != rhs.activityDate {
+                return lhs.activityDate > rhs.activityDate
+            }
+        case .oldestFirst:
+            if lhs.activityDate != rhs.activityDate {
+                return lhs.activityDate < rhs.activityDate
+            }
+        }
+        return lhs.url.lastPathComponent.localizedCaseInsensitiveCompare(rhs.url.lastPathComponent) == .orderedAscending
+    }
+
+    private func projectActivityDate(from values: URLResourceValues) -> Date {
+        values.contentModificationDate ??
+        values.attributeModificationDate ??
+        values.creationDate ??
+        .distantPast
+    }
+
+    private static func normalizedRelativePath(for url: URL, rootURL: URL) -> String {
+        let rootPath = rootURL.standardizedFileURL.path
+        let itemPath = url.standardizedFileURL.path
+        guard itemPath.hasPrefix(rootPath) else {
+            return url.lastPathComponent
+        }
+        let startIndex = itemPath.index(itemPath.startIndex, offsetBy: rootPath.count)
+        let raw = String(itemPath[startIndex...])
+        return raw.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     private func previewLastError(from snapshot: BatchSnapshot?, projects: [BatchProjectPlan]) -> String? {
@@ -625,6 +739,11 @@ final class BatchCoordinator: @unchecked Sendable {
             return update
         }
     }
+}
+
+private struct ProjectRootDescriptor {
+    var url: URL
+    var activityDate: Date
 }
 
 private actor BatchProjectRecorder {

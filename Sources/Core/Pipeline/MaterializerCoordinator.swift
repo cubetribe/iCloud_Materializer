@@ -73,6 +73,13 @@ final class MaterializerCoordinator: @unchecked Sendable {
             )
             await log(
                 .info,
+                configuration.rescueProfile.runtimeSummary,
+                jobID: configuration.jobID,
+                store: store,
+                onUpdate: onUpdate
+            )
+            await log(
+                .info,
                 "Hydration window: \(configuration.hydrationWindow) active iCloud items per worker, lookahead buffer \(configuration.effectiveHydrationPrefetchBuffer) overall, up to \(configuration.maxActiveHydrations) active / \(configuration.maxRequestedHydrations) requested overall",
                 jobID: configuration.jobID,
                 store: store,
@@ -184,6 +191,12 @@ final class MaterializerCoordinator: @unchecked Sendable {
 
                 if failures.isEmpty {
                     for directory in topLevelItems where directory.kind == .directory {
+                        await requestDirectoryWarmupIfNeeded(
+                            for: directory,
+                            configuration: configuration,
+                            store: store,
+                            onUpdate: onUpdate
+                        )
                         try await tracker.updateTopLevelPhase(
                             .discovering,
                             detail: "Discovering \(directory.relativePath)",
@@ -331,8 +344,20 @@ final class MaterializerCoordinator: @unchecked Sendable {
                 await onUpdate(.failures(failures))
             }
         } catch is CancellationError {
+            AppSessionLog.shared.append(
+                level: .warning,
+                category: "job",
+                message: "Job cancelled",
+                path: configuration.sourceURL.path
+            )
             try? await tracker.cancel(message: "Job cancelled.")
         } catch {
+            AppSessionLog.shared.append(
+                level: .error,
+                category: "job",
+                message: "Job failed: \(error.localizedDescription)",
+                path: configuration.sourceURL.path
+            )
             let failure = FailureRecord(
                 id: UUID(),
                 relativePath: configuration.sourceURL.path,
@@ -903,6 +928,48 @@ final class MaterializerCoordinator: @unchecked Sendable {
         return (rootFiles, directories)
     }
 
+    private func requestDirectoryWarmupIfNeeded(
+        for directory: ScannedItem,
+        configuration: JobConfiguration,
+        store: JobStore,
+        onUpdate: @escaping @Sendable (JobUpdate) async -> Void
+    ) async {
+        guard configuration.rescueProfile == .aggressive else { return }
+
+        let directoryURL = configuration.sourceURL.appendingPathComponent(directory.relativePath, isDirectory: true)
+        let candidateLimit = BatchCoordinator.prefetchCandidateLimit(scanDepth: configuration.localPrefetchScanDepth)
+        let candidates = BatchCoordinator.prefetchCandidateURLs(
+            projectURL: directoryURL,
+            transferPolicy: configuration.transferPolicy,
+            childLimit: candidateLimit
+        )
+        let resourceKeys: Set<URLResourceKey> = [.isUbiquitousItemKey]
+
+        var requestedCount = 0
+        for candidate in candidates {
+            guard let values = try? candidate.resourceValues(forKeys: resourceKeys),
+                  values.isUbiquitousItem == true else {
+                continue
+            }
+            do {
+                try FileManager.default.startDownloadingUbiquitousItem(at: candidate)
+                requestedCount += 1
+            } catch {
+                continue
+            }
+        }
+
+        guard requestedCount > 0 else { return }
+        await log(
+            .info,
+            "Directory warmup requested for \(directory.relativePath) across \(requestedCount) path(s)",
+            jobID: configuration.jobID,
+            store: store,
+            onUpdate: onUpdate,
+            path: directory.relativePath
+        )
+    }
+
     private func log(
         _ level: LogLevel,
         _ message: String,
@@ -926,6 +993,12 @@ final class MaterializerCoordinator: @unchecked Sendable {
         failureSnapshot.phaseDetail = "Failed before job startup"
         failureSnapshot.finishedAt = Date()
         failureSnapshot.lastError = error.localizedDescription
+        AppSessionLog.shared.append(
+            level: .error,
+            category: "fatal",
+            message: "Job failed before startup: \(error.localizedDescription)",
+            path: snapshot.sourcePath
+        )
         await onUpdate(.snapshot(failureSnapshot))
     }
 

@@ -6,6 +6,22 @@ The app is built for large coding-project folders that may contain iCloud placeh
 
 Current operational change history lives in [CHANGELOG.md](CHANGELOG.md).
 
+## Versioning
+
+The repository version is controlled by the root-level [VERSION](VERSION) file.
+
+Rules:
+- `VERSION` is the single source of truth for the app version shown in the UI.
+- The format is strict semantic versioning: `MAJOR.MINOR.PATCH`.
+- Every repository change must bump `VERSION` before commit or push.
+- Use a patch bump for fixes, a minor bump for new features, and a major bump for breaking workflow or compatibility changes.
+- Do not hardcode the visible app version anywhere else in SwiftUI or other source files.
+
+Build behavior:
+- the root `VERSION` file is bundled into the macOS app
+- the SwiftUI frontend reads that bundled file at runtime and shows it in the header automatically
+- if `VERSION` is missing or not valid semantic versioning, tests should fail
+
 ## Current Status
 
 `iCloud Materializer` is a macOS-only SwiftUI app with a production-oriented first implementation pass.
@@ -14,6 +30,8 @@ Implemented today:
 - single-project runs
 - batch queue runs over direct child folders
 - SQLite-backed per-job state
+- automatic per-session JSONL log files under `~/Library/Logs/iCloudMaterializer/`
+- coalesced UI update delivery and large-queue rendering guards so long batch runs stay observable without stalling the rescue workers
 - mandatory preflight before rescue runs start
 - shallow-first discovery, hydration, staged copy, verification, and promotion
 - live telemetry, logs, failures, stall warnings, and hydration-state timing
@@ -100,6 +118,7 @@ Behavior:
 - each direct child folder becomes its own isolated project run
 - `_Materializer_Archives` and `.icloud-materializer` are ignored as source children
 - each project produces its own local copy; archive/deletion review is no longer part of the default critical path
+- very large queues are windowed in the live UI so monitoring stays responsive while the full persisted batch state still tracks every project
 - project-root prewarming is disabled by default for rescue runs
 - completed batch projects can be resumed or skipped on later reruns when their expected outputs still exist
 
@@ -170,6 +189,27 @@ The UI exposes:
 - failure list
 - estimated remaining work after discovery has enough information
 - run-health warnings when there has been no progress for 90 seconds or more
+- the current session log file path plus direct access to the log folder
+
+## Persistent Log Files
+
+The app now writes persistent newline-delimited JSON log files automatically for every session.
+
+Location:
+- session log folder: `~/Library/Logs/iCloudMaterializer/`
+- current session file: `session-YYYYMMDD-HHMMSS.log.jsonl`
+- stable latest-session pointer: `latest.log.jsonl`
+
+What is logged:
+- app launch and termination
+- user actions such as start, pause, resume, cancel, quarantine approval, and log export
+- pipeline events written through the internal job logger
+- batch project start/completion/failure
+- fatal startup failures and job-level failures
+
+Operational rule:
+- when a run fails or the app appears to crash, inspect `latest.log.jsonl` first
+- keep the log file together with the exported SQLite/job state when reporting or debugging rescue failures
 
 Run-health thresholds:
 - watch after 90 seconds without progress
@@ -200,6 +240,8 @@ xcodebuild -scheme iCloudMaterializer -project iCloudMaterializer.xcodeproj -des
 xcodebuild -scheme iCloudMaterializer -project iCloudMaterializer.xcodeproj -destination 'platform=macOS' test
 ```
 
+Before shipping any change, bump [VERSION](VERSION) first and keep the changelog entry under `[Unreleased]` aligned with that work.
+
 ## Moving Or Renaming The Repository Folder
 
 The repository does not depend on a fixed absolute workspace path.
@@ -216,6 +258,7 @@ The generated Xcode project should be treated as derived from [project.yml](proj
 ## Repository Layout
 
 - [project.yml](project.yml): source of truth for the Xcode project
+- [VERSION](VERSION): semantic app version source of truth; bump this on every change
 - [Sources/App](Sources/App): app entry point and Info.plist
 - [Sources/UI](Sources/UI): SwiftUI screens and view model
 - [Sources/Core](Sources/Core): engines, models, persistence, recovery, and pipeline logic
