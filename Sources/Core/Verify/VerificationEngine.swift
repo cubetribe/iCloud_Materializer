@@ -12,9 +12,12 @@ struct VerificationEngine: Sendable {
         let fileManager = FileManager.default
         let expectedMap = Dictionary(uniqueKeysWithValues: expectedItems.map { ($0.relativePath, $0) })
         let actualMap = try await buildActualInventory(root: root, fileManager: fileManager, pauseController: pauseController)
+        let canonicalExpectedPaths = canonicalPathLookup(for: expectedItems.map(\.relativePath))
+        let canonicalActualPaths = canonicalPathLookup(for: Array(actualMap.keys))
         let allowedAncestorDirectories = ancestorScaffoldDirectories(for: expectedItems)
         var mismatches: [String] = []
         var verifiedBytes: Int64 = 0
+        var matchedActualPaths: Set<String> = []
 
         for item in expectedItems {
             try await checkpoint(pauseController)
@@ -22,10 +25,18 @@ struct VerificationEngine: Sendable {
                 await onProgress(item.relativePath)
             }
             try await checkpoint(pauseController)
-            guard let actual = actualMap[item.relativePath] else {
+            guard let match = resolveActualMatch(
+                for: item.relativePath,
+                actualMap: actualMap,
+                canonicalExpectedPaths: canonicalExpectedPaths,
+                canonicalActualPaths: canonicalActualPaths,
+                matchedActualPaths: matchedActualPaths
+            ) else {
                 mismatches.append("Missing item: \(item.relativePath)")
                 continue
             }
+            let actual = match.item
+            matchedActualPaths.insert(match.path)
             switch item.kind {
             case .directory:
                 if actual.kind != .directory {
@@ -49,7 +60,7 @@ struct VerificationEngine: Sendable {
         }
 
         let extras = actualMap.keys.filter { path in
-            guard expectedMap[path] == nil, let actualItem = actualMap[path] else {
+            guard !matchedActualPaths.contains(path), expectedMap[path] == nil, let actualItem = actualMap[path] else {
                 return false
             }
             return !shouldIgnoreExtra(
@@ -65,6 +76,33 @@ struct VerificationEngine: Sendable {
         }
 
         return VerificationResult(verifiedCount: expectedItems.count, verifiedBytes: verifiedBytes)
+    }
+
+    private func resolveActualMatch(
+        for expectedPath: String,
+        actualMap: [String: ScannedItem],
+        canonicalExpectedPaths: [String: [String]],
+        canonicalActualPaths: [String: [String]],
+        matchedActualPaths: Set<String>
+    ) -> (path: String, item: ScannedItem)? {
+        if let exact = actualMap[expectedPath] {
+            return (expectedPath, exact)
+        }
+
+        let canonicalPath = canonicalPathKey(for: expectedPath)
+        guard
+            let expectedCandidates = canonicalExpectedPaths[canonicalPath],
+            expectedCandidates.count == 1,
+            let actualCandidates = canonicalActualPaths[canonicalPath],
+            actualCandidates.count == 1,
+            let actualPath = actualCandidates.first,
+            matchedActualPaths.contains(actualPath) == false,
+            let actual = actualMap[actualPath]
+        else {
+            return nil
+        }
+
+        return (actualPath, actual)
     }
 
     private func buildActualInventory(
@@ -146,6 +184,14 @@ struct VerificationEngine: Sendable {
         }
 
         return ancestors
+    }
+
+    private func canonicalPathLookup(for paths: [String]) -> [String: [String]] {
+        Dictionary(grouping: paths, by: canonicalPathKey(for:))
+    }
+
+    private func canonicalPathKey(for path: String) -> String {
+        path.precomposedStringWithCanonicalMapping
     }
 
     private func checkpoint(_ pauseController: PauseController?) async throws {

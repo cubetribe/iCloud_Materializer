@@ -26,6 +26,7 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Root-level `VERSION` file as the semantic-version source of truth, plus an in-app version label that reads the bundled file at runtime.
 - Automatic persistent session log files under `~/Library/Logs/iCloudMaterializer/`, including a stable `latest.log.jsonl` pointer for debugging failures after the fact.
 - A visible `Hydration Mode` switch in the UI so rescue runs can now choose between API-only hydration, hybrid API plus read-pressure hydration, and read-pressure-only warmup behavior.
+- A batch-side `Revalidate Finished` action that rescans already finished projects against the current source inventory and writes the updated verification result back into the persisted batch resume state.
 
 ### Changed
 - Versioning now follows a strict root-`VERSION` workflow: every change must bump semantic versioning there, and the frontend updates from that bundled file automatically.
@@ -67,3 +68,5 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Added timeout-bounded read-pressure probes and recurring no-progress health logs so long rescue runs no longer disappear into a silent half-hour stall without new diagnostics.
 - Fixed a nested-chunk verification bug where intermediate directories such as `apps` or `apps/mobile` could be reported as unexpected items even though they were only scaffolding created while assembling a deeper subtree copy.
 - Improved SQLite open diagnostics for batch job state so a persistence failure now logs the exact runtime database path together with parent-directory availability and writability instead of only surfacing the generic SQLite error string.
+- Fixed verification so canonically equivalent Unicode filenames, such as precomposed and decomposed umlaut paths, are treated as the same file instead of being reported as false missing/extra pairs.
+- Finished batch projects can now be revalidated after verifier fixes land, and the persisted batch state is updated in place to upgrade false warnings back to `completed` or downgrade inconsistent copies to warnings.

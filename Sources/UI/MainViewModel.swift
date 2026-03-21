@@ -109,6 +109,31 @@ final class MainViewModel {
         max(0, batchProjects.count - visibleBatchProjects.count)
     }
 
+    var finishedBatchProjectCount: Int {
+        batchProjects.filter { project in
+            switch project.state {
+            case .completed, .completedWithWarnings:
+                return true
+            case .pending, .running, .failed, .conflicted, .cancelled:
+                return false
+            }
+        }.count
+    }
+
+    var canRevalidateFinishedBatchProjects: Bool {
+        runMode == .batchQueue &&
+        sourceURL != nil &&
+        destinationURL != nil &&
+        !isRunning &&
+        finishedBatchProjectCount > 0
+    }
+
+    var revalidationActionTitle: String {
+        let count = finishedBatchProjectCount
+        guard count > 0 else { return "Revalidate Finished" }
+        return "Revalidate Finished (\(count))"
+    }
+
     func runHealthState(now: Date) -> RunHealthState? {
         RunHealthState.evaluate(isRunning: isRunning, lastProgressAt: lastProgressAt, now: now)
     }
@@ -318,6 +343,61 @@ final class MainViewModel {
             await pauseController.cancel()
         }
         jobTask?.cancel()
+    }
+
+    func revalidateFinishedProjects() {
+        guard runMode == .batchQueue, let sourceURL, let destinationURL else {
+            snapshot.lastError = "Choose a batch source root and destination root before revalidating finished projects."
+            return
+        }
+
+        let configuration = makeBatchConfiguration(sourceURL: sourceURL, destinationURL: destinationURL)
+        let preview: (snapshot: BatchSnapshot, projects: [BatchProjectPlan])
+        do {
+            preview = try batchCoordinator.preview(configuration: configuration)
+        } catch {
+            snapshot.lastError = error.localizedDescription
+            return
+        }
+
+        let revalidationCandidates = preview.projects.filter { project in
+            switch project.state {
+            case .completed, .completedWithWarnings:
+                return true
+            case .pending, .running, .failed, .conflicted, .cancelled:
+                return false
+            }
+        }
+        guard !revalidationCandidates.isEmpty else {
+            batchProjects = preview.projects
+            batchSnapshot = preview.snapshot
+            snapshot.lastError = "No finished batch projects are available for revalidation."
+            return
+        }
+
+        AppSessionLog.shared.append(
+            level: .info,
+            category: "batch",
+            message: "Starting finished-project revalidation for \(revalidationCandidates.count) project(s)",
+            path: sourceURL.path
+        )
+        prepareForRun(sourceURL: sourceURL, destinationURL: destinationURL)
+        batchProjects = preview.projects
+        batchSnapshot = preview.snapshot
+        let relay = ViewUpdateRelay { [weak self] updates in
+            guard let self else { return }
+            await self.consume(buffered: updates)
+        }
+        jobTask = Task {
+            await batchCoordinator.revalidateFinishedProjects(
+                configuration: configuration,
+                pauseController: pauseController!
+            ) { [weak self] update in
+                guard self != nil else { return }
+                await relay.enqueue(update)
+            }
+            await relay.flush()
+        }
     }
 
     func exportLog() {

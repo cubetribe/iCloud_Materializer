@@ -51,6 +51,7 @@ Implemented today:
 - shallow-first discovery, hydration, staged copy, verification, and promotion
 - aggressive rescue warmup that can request hydration across multiple top-level directories in parallel
 - selectable hydration modes: API only, hybrid API plus read pressure, and read-pressure-only
+- revalidation of already finished batch projects so verifier fixes can be applied retroactively to persisted batch state without rerunning hydration or copy
 - budgeted read-pressure probes that touch directories and small file reads before the copy workers need the data, without letting one hidden tree monopolize warmup
 - parallel prewarm of multiple upcoming batch projects so the next rescue candidates are already nudged before the current project finishes
 - live telemetry, persistent logs, no-progress health warnings, failures, and hydration-state timing
@@ -158,6 +159,7 @@ Behavior:
 - very large queues are windowed in the live UI so monitoring stays responsive while the full persisted batch state still tracks every project
 - project-root prewarming stays conservative by default, but aggressive/hybrid rescue can prewarm multiple upcoming projects in parallel
 - completed batch projects can be resumed or skipped on later reruns when their expected outputs still exist
+- finished batch projects can be revalidated on demand with the current verifier, which is useful after consistency-fix releases such as Unicode-normalization-safe path matching
 
 Batch runtime artifacts:
 - batch resume state: `<destination>/.icloud-materializer/batch-resume/<resume-key>/batch-state.json`

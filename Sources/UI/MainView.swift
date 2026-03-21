@@ -357,6 +357,14 @@ struct MainView: View {
                         Button("Cancel") { viewModel.cancel() }
                             .disabled(!viewModel.isRunning)
                     }
+                    if viewModel.runMode == .batchQueue {
+                        Button(viewModel.revalidationActionTitle) { viewModel.revalidateFinishedProjects() }
+                            .disabled(!viewModel.canRevalidateFinishedBatchProjects)
+                        Text("Revalidation rescans the current source inventory for already finished batch projects and reruns verification on their local targets. That lets newer verifier fixes, like Unicode-safe path matching, flow back into the persisted batch state.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     Button("Export Log") { viewModel.exportLog() }
                         .disabled(viewModel.logs.isEmpty)
                     Divider()
@@ -397,6 +405,13 @@ struct MainView: View {
 
                 if viewModel.sourceURL != nil {
                     Text("Automatic archive creation is disabled during rescue runs. Batch jobs finish once the local copy is verified.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if viewModel.finishedBatchProjectCount > 0 {
+                    Text("\(viewModel.finishedBatchProjectCount) finished project(s) can be revalidated with the current verifier without rerunning hydration or copy.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

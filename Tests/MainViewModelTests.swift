@@ -79,6 +79,36 @@ final class MainViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.hiddenBatchProjectCount, 0)
     }
 
+    func testCanRevalidateFinishedBatchProjectsOnlyWhenBatchQueueIsIdleAndFinishedProjectsExist() {
+        let viewModel = MainViewModel()
+        viewModel.runMode = .batchQueue
+        viewModel.sourceURL = URL(fileURLWithPath: "/tmp/source", isDirectory: true)
+        viewModel.destinationURL = URL(fileURLWithPath: "/tmp/destination", isDirectory: true)
+        viewModel.batchProjects = [
+            BatchProjectPlan(
+                id: UUID(),
+                sourceURL: URL(fileURLWithPath: "/tmp/source/Alpha", isDirectory: true),
+                destinationRootURL: URL(fileURLWithPath: "/tmp/destination", isDirectory: true),
+                sourceFolderName: "Alpha",
+                targetFolderName: "Alpha-Lokal",
+                state: .completed,
+                detail: nil,
+                archiveURL: nil,
+                deletionManifestURL: nil,
+                readyForDeletion: false,
+                startedAt: nil,
+                finishedAt: nil
+            )
+        ]
+
+        XCTAssertEqual(viewModel.finishedBatchProjectCount, 1)
+        XCTAssertTrue(viewModel.canRevalidateFinishedBatchProjects)
+        XCTAssertEqual(viewModel.revalidationActionTitle, "Revalidate Finished (1)")
+
+        viewModel.batchSnapshot.state = .running
+        XCTAssertFalse(viewModel.canRevalidateFinishedBatchProjects)
+    }
+
     private func makeProject(index: Int) -> BatchProjectPlan {
         let sourceURL = URL(fileURLWithPath: "/tmp/source/Project-\(index)", isDirectory: true)
         return BatchProjectPlan(

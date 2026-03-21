@@ -2,6 +2,8 @@ import Foundation
 
 final class BatchCoordinator: @unchecked Sendable {
     private let fileManager: FileManager
+    private let scanEngine = ScanEngine()
+    private let verificationEngine = VerificationEngine()
     private let coordinatorFactory: @Sendable () -> MaterializerCoordinator
     private let projectPrefetcher: @Sendable (URL, TransferPolicy, Int, HydrationMode, Int, PauseController) async throws -> Void
 
@@ -312,6 +314,245 @@ final class BatchCoordinator: @unchecked Sendable {
         }
     }
 
+    func revalidateFinishedProjects(
+        configuration: BatchConfiguration,
+        pauseController: PauseController,
+        onUpdate: @escaping @Sendable (JobUpdate) async -> Void
+    ) async {
+        var projects: [BatchProjectPlan] = []
+        let startedAt = Date()
+
+        do {
+            try prepareBatchArtifacts(configuration: configuration)
+            let preview = try preview(configuration: configuration)
+            projects = preview.projects
+
+            let candidateIndices = projects.indices.filter { shouldRevalidateFinishedProject(projects[$0]) }
+            if candidateIndices.isEmpty {
+                let idleSnapshot = snapshot(
+                    for: projects,
+                    configuration: configuration,
+                    state: finalState(for: projects),
+                    startedAt: preview.snapshot.startedAt,
+                    finishedAt: Date(),
+                    lastError: preview.snapshot.lastError
+                )
+                try savePersistedRun(snapshot: idleSnapshot, projects: projects, configuration: configuration)
+                await emitBatchLog(
+                    level: .info,
+                    message: "Revalidation skipped because no finished projects were eligible.",
+                    path: configuration.sourceRootURL.path,
+                    onUpdate: onUpdate
+                )
+                await onUpdate(.batchProjects(projects))
+                await onUpdate(.batchSnapshot(idleSnapshot))
+                return
+            }
+
+            let runningSnapshot = snapshot(
+                for: projects,
+                configuration: configuration,
+                state: .running,
+                currentProjectIndex: candidateIndices[0] + 1,
+                currentProjectName: projects[candidateIndices[0]].sourceFolderName,
+                startedAt: startedAt
+            )
+            try savePersistedRun(snapshot: runningSnapshot, projects: projects, configuration: configuration)
+            await emitBatchLog(
+                level: .info,
+                message: "Starting revalidation of \(candidateIndices.count) finished batch project(s)",
+                path: configuration.sourceRootURL.path,
+                onUpdate: onUpdate
+            )
+            await onUpdate(.batchProjects(projects))
+            await onUpdate(.batchSnapshot(runningSnapshot))
+
+            for (position, index) in candidateIndices.enumerated() {
+                try await pauseController.checkpoint()
+                let projectName = projects[index].sourceFolderName
+                let targetURL = projects[index].targetURL
+
+                projects[index].state = .running
+                projects[index].startedAt = projects[index].startedAt ?? startedAt
+                projects[index].finishedAt = nil
+                projects[index].detail = revalidationDetail(
+                    base: projects[index].detail,
+                    status: "Running current consistency check."
+                )
+
+                let projectSnapshot = snapshot(
+                    for: projects,
+                    configuration: configuration,
+                    state: .running,
+                    currentProjectIndex: index + 1,
+                    currentProjectName: projectName,
+                    startedAt: startedAt
+                )
+                try savePersistedRun(snapshot: projectSnapshot, projects: projects, configuration: configuration)
+                await onUpdate(.batchProjects(projects))
+                await onUpdate(.batchSnapshot(projectSnapshot))
+                await emitBatchLog(
+                    level: .info,
+                    message: "Revalidating finished batch project \(projectName)",
+                    path: targetURL.path,
+                    onUpdate: onUpdate
+                )
+
+                do {
+                    guard fileManager.fileExists(atPath: targetURL.path) else {
+                        throw PipelineError.copyFailed(targetURL.path)
+                    }
+
+                    let expectedItems = try await scanEngine.scan(
+                        sourceRoot: projects[index].sourceURL,
+                        transferPolicy: configuration.transferPolicy,
+                        pauseController: pauseController
+                    )
+                    _ = try await verificationEngine.verify(
+                        expectedItems: expectedItems,
+                        at: targetURL,
+                        pauseController: pauseController
+                    )
+
+                    projects[index].state = .completed
+                    projects[index].finishedAt = Date()
+                    projects[index].detail = revalidationDetail(
+                        base: projects[index].detail,
+                        status: "Passed with the current verifier on \((projects[index].finishedAt ?? Date()).ISO8601Format())."
+                    )
+                    await emitBatchLog(
+                        level: .info,
+                        message: "Revalidation passed for \(projectName)",
+                        path: targetURL.path,
+                        onUpdate: onUpdate
+                    )
+                } catch is CancellationError {
+                    projects[index].state = .cancelled
+                    projects[index].finishedAt = Date()
+                    projects[index].readyForDeletion = false
+                    projects[index].detail = revalidationDetail(
+                        base: projects[index].detail,
+                        status: "Cancelled during consistency check."
+                    )
+                    let cancelledSnapshot = snapshot(
+                        for: projects,
+                        configuration: configuration,
+                        state: .cancelled,
+                        currentProjectIndex: index + 1,
+                        currentProjectName: projectName,
+                        startedAt: startedAt,
+                        finishedAt: Date(),
+                        lastError: "Revalidation cancelled."
+                    )
+                    try savePersistedRun(snapshot: cancelledSnapshot, projects: projects, configuration: configuration)
+                    await emitBatchLog(
+                        level: .warning,
+                        message: "Revalidation cancelled while checking \(projectName)",
+                        path: targetURL.path,
+                        onUpdate: onUpdate
+                    )
+                    await onUpdate(.batchProjects(projects))
+                    await onUpdate(.batchSnapshot(cancelledSnapshot))
+                    return
+                } catch PipelineError.verificationFailed(let mismatches) {
+                    projects[index].state = .completedWithWarnings
+                    projects[index].finishedAt = Date()
+                    projects[index].readyForDeletion = false
+                    projects[index].detail = revalidationDetail(
+                        base: projects[index].detail,
+                        status: "Warnings: \(Self.revalidationSummary(for: mismatches))"
+                    )
+                    await emitBatchLog(
+                        level: .warning,
+                        message: "Revalidation found mismatches for \(projectName): \(Self.revalidationSummary(for: mismatches))",
+                        path: targetURL.path,
+                        onUpdate: onUpdate
+                    )
+                } catch {
+                    projects[index].state = .failed
+                    projects[index].finishedAt = Date()
+                    projects[index].readyForDeletion = false
+                    projects[index].detail = revalidationDetail(
+                        base: projects[index].detail,
+                        status: "Failed: \(error.localizedDescription)"
+                    )
+                    await emitBatchLog(
+                        level: .error,
+                        message: "Revalidation failed for \(projectName): \(error.localizedDescription)",
+                        path: targetURL.path,
+                        onUpdate: onUpdate
+                    )
+                }
+
+                let loopSnapshot = snapshot(
+                    for: projects,
+                    configuration: configuration,
+                    state: .running,
+                    currentProjectIndex: candidateIndices.indices.contains(position + 1) ? candidateIndices[position + 1] + 1 : nil,
+                    currentProjectName: candidateIndices.indices.contains(position + 1) ? projects[candidateIndices[position + 1]].sourceFolderName : nil,
+                    startedAt: startedAt
+                )
+                try savePersistedRun(snapshot: loopSnapshot, projects: projects, configuration: configuration)
+                await onUpdate(.batchProjects(projects))
+                await onUpdate(.batchSnapshot(loopSnapshot))
+            }
+
+            let finalSnapshot = snapshot(
+                for: projects,
+                configuration: configuration,
+                state: finalState(for: projects),
+                startedAt: startedAt,
+                finishedAt: Date(),
+                lastError: projects.first(where: { $0.state == .failed })?.detail
+            )
+            try savePersistedRun(snapshot: finalSnapshot, projects: projects, configuration: configuration)
+            await emitBatchLog(
+                level: finalSnapshot.state == .completed ? .info : .warning,
+                message: "Finished revalidating completed batch projects with state \(finalSnapshot.state.rawValue)",
+                path: configuration.sourceRootURL.path,
+                onUpdate: onUpdate
+            )
+            await onUpdate(.batchProjects(projects))
+            await onUpdate(.batchSnapshot(finalSnapshot))
+        } catch is CancellationError {
+            let cancelledSnapshot = snapshot(
+                for: projects,
+                configuration: configuration,
+                state: .cancelled,
+                startedAt: startedAt,
+                finishedAt: Date(),
+                lastError: "Revalidation cancelled."
+            )
+            try? savePersistedRun(snapshot: cancelledSnapshot, projects: projects, configuration: configuration)
+            await emitBatchLog(
+                level: .warning,
+                message: "Finished-project revalidation cancelled",
+                path: configuration.sourceRootURL.path,
+                onUpdate: onUpdate
+            )
+            await onUpdate(.batchProjects(projects))
+            await onUpdate(.batchSnapshot(cancelledSnapshot))
+        } catch {
+            let failedSnapshot = snapshot(
+                for: projects,
+                configuration: configuration,
+                state: .failed,
+                startedAt: startedAt,
+                finishedAt: Date(),
+                lastError: error.localizedDescription
+            )
+            try? savePersistedRun(snapshot: failedSnapshot, projects: projects, configuration: configuration)
+            await emitBatchLog(
+                level: .error,
+                message: "Finished-project revalidation failed: \(error.localizedDescription)",
+                path: configuration.sourceRootURL.path,
+                onUpdate: onUpdate
+            )
+            await onUpdate(.batchProjects(projects))
+            await onUpdate(.batchSnapshot(failedSnapshot))
+        }
+    }
+
     private func freshProjects(configuration: BatchConfiguration) throws -> [BatchProjectPlan] {
         let childURLs = try fileManager.contentsOfDirectory(
             at: configuration.sourceRootURL,
@@ -433,6 +674,15 @@ final class BatchCoordinator: @unchecked Sendable {
         project.state == .conflicted || isRestorableCompleted(project)
     }
 
+    private func shouldRevalidateFinishedProject(_ project: BatchProjectPlan) -> Bool {
+        switch project.state {
+        case .completed, .completedWithWarnings:
+            return true
+        case .pending, .running, .failed, .conflicted, .cancelled:
+            return false
+        }
+    }
+
     private func retryDetail(for project: BatchProjectPlan) -> String {
         switch project.state {
         case .failed:
@@ -541,10 +791,28 @@ final class BatchCoordinator: @unchecked Sendable {
             .map(String.init)
             .filter {
                 $0 != "Project root prefetch requested." &&
-                $0 != "Project directory warmup requested."
+                $0 != "Project directory warmup requested." &&
+                !$0.hasPrefix("Revalidation:")
             }
         guard !sanitizedLines.isEmpty else { return nil }
         return sanitizedLines.joined(separator: "\n")
+    }
+
+    private func revalidationDetail(base: String?, status: String) -> String {
+        let preservedLines = sanitizedDetail(base)?
+            .split(separator: "\n")
+            .map(String.init) ?? []
+        return (preservedLines + ["Revalidation: \(status)"]).joined(separator: "\n")
+    }
+
+    private func emitBatchLog(
+        level: LogLevel,
+        message: String,
+        path: String?,
+        onUpdate: @escaping @Sendable (JobUpdate) async -> Void
+    ) async {
+        AppSessionLog.shared.append(level: level, category: "batch", message: message, path: path)
+        await onUpdate(.log(LogEntry(id: UUID(), createdAt: Date(), level: level, message: message, path: path)))
     }
 
     private func compareProjectRoots(
@@ -739,6 +1007,15 @@ final class BatchCoordinator: @unchecked Sendable {
             return .completedWithWarnings
         }
         return .completed
+    }
+
+    private static func revalidationSummary(for mismatches: [String]) -> String {
+        guard !mismatches.isEmpty else { return "No mismatches reported." }
+        let preview = mismatches.prefix(3).joined(separator: " | ")
+        if mismatches.count > 3 {
+            return "\(mismatches.count) mismatch(es): \(preview) | +\(mismatches.count - 3) more"
+        }
+        return "\(mismatches.count) mismatch(es): \(preview)"
     }
 
     private func prefixed(update: JobUpdate, projectName: String) -> JobUpdate {

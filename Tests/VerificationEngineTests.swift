@@ -125,6 +125,42 @@ final class VerificationEngineTests: XCTestCase {
         XCTAssertEqual(result.verifiedCount, 2)
         XCTAssertEqual(result.verifiedBytes, Int64(contents.utf8.count))
     }
+
+    func testVerificationTreatsCanonicallyEquivalentUnicodePathsAsTheSameFile() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let decomposedName = "fu\u{0308}r.txt"
+        let precomposedName = "für.txt"
+        XCTAssertNotEqual(Array(decomposedName.utf8), Array(precomposedName.utf8))
+
+        let fileURL = root.appendingPathComponent(decomposedName, isDirectory: false)
+        let contents = "payload"
+        try Data(contents.utf8).write(to: fileURL)
+
+        let items = [
+            ScannedItem(
+                id: UUID(),
+                relativePath: precomposedName,
+                kind: .file,
+                expectedSize: Int64(contents.utf8.count),
+                isHidden: false,
+                isUbiquitous: false,
+                isLocalReady: true,
+                downloadStatusRaw: nil,
+                symlinkDestination: nil,
+                state: .copied,
+                lastError: nil
+            )
+        ]
+
+        let result = try await VerificationEngine().verify(expectedItems: items, at: root)
+
+        XCTAssertEqual(result.verifiedCount, 1)
+        XCTAssertEqual(result.verifiedBytes, Int64(contents.utf8.count))
+    }
 }
 
 private actor VerificationProgressRecorder {

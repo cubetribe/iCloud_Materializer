@@ -269,6 +269,162 @@ final class BatchCoordinatorTests: XCTestCase {
         XCTAssertTrue(plans.compactMap { $0.deletionManifestURL }.allSatisfy { fileManager.fileExists(atPath: $0.path) })
     }
 
+    func testRevalidateFinishedProjectsUpgradesUnicodeOnlyWarningsToCompleted() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("BatchSource", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("BatchDestination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        let sourceProject = sourceRoot.appendingPathComponent("Alpha", isDirectory: true)
+        let targetProject = destinationRoot.appendingPathComponent("Alpha-Lokal", isDirectory: true)
+        try fileManager.createDirectory(at: sourceProject, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: targetProject, withIntermediateDirectories: true)
+
+        let sourceName = "für.txt"
+        let targetName = "fu\u{0308}r.txt"
+        XCTAssertNotEqual(Array(sourceName.utf8), Array(targetName.utf8))
+        try Data("payload".utf8).write(to: sourceProject.appendingPathComponent(sourceName, isDirectory: false))
+        try Data("payload".utf8).write(to: targetProject.appendingPathComponent(targetName, isDirectory: false))
+
+        var configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
+        configuration.orderingMode = .alphabetical
+
+        let persisted = PersistedBatchRun(
+            snapshot: BatchSnapshot(
+                batchID: configuration.batchID,
+                state: .completedWithWarnings,
+                sourceRootPath: sourceRoot.path,
+                destinationRootPath: destinationRoot.path,
+                suffix: configuration.suffix,
+                totalProjects: 1,
+                completedProjects: 0,
+                warningProjects: 1,
+                failedProjects: 0,
+                conflictedProjects: 0,
+                readyForDeletionProjects: 0,
+                currentProjectIndex: nil,
+                currentProjectName: nil,
+                startedAt: Date(timeIntervalSince1970: 10),
+                finishedAt: Date(timeIntervalSince1970: 20),
+                lastError: "Previous verifier flagged a filename mismatch."
+            ),
+            projects: [
+                BatchProjectPlan(
+                    id: UUID(),
+                    sourceURL: sourceProject,
+                    destinationRootURL: destinationRoot,
+                    sourceFolderName: "Alpha",
+                    targetFolderName: "Alpha-Lokal",
+                    state: .completedWithWarnings,
+                    detail: "Revalidation: Warnings: 2 mismatch(es): Missing item: für.txt | Unexpected item: für.txt",
+                    archiveURL: nil,
+                    deletionManifestURL: nil,
+                    readyForDeletion: false,
+                    startedAt: Date(timeIntervalSince1970: 10),
+                    finishedAt: Date(timeIntervalSince1970: 20)
+                )
+            ],
+            updatedAt: Date(timeIntervalSince1970: 21)
+        )
+        try writePersistedBatch(persisted, to: configuration.resumeStateURL)
+
+        let recorder = BatchUpdateRecorder()
+        let coordinator = BatchCoordinator()
+        await coordinator.revalidateFinishedProjects(
+            configuration: configuration,
+            pauseController: PauseController()
+        ) { update in
+            await recorder.record(update)
+        }
+
+        let batchSnapshot = await recorder.lastBatchSnapshot()
+        XCTAssertEqual(batchSnapshot?.state, .completed)
+        XCTAssertEqual(batchSnapshot?.completedProjects, 1)
+        XCTAssertEqual(batchSnapshot?.warningProjects, 0)
+
+        let plans = await recorder.lastBatchProjects()
+        XCTAssertEqual(plans.first?.state, .completed)
+        XCTAssertTrue(plans.first?.detail?.contains("Revalidation: Passed with the current verifier") == true)
+    }
+
+    func testRevalidateFinishedProjectsMarksMismatchedCopiesAsWarnings() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("BatchSource", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("BatchDestination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        let sourceProject = sourceRoot.appendingPathComponent("Alpha", isDirectory: true)
+        let targetProject = destinationRoot.appendingPathComponent("Alpha-Lokal", isDirectory: true)
+        try fileManager.createDirectory(at: sourceProject, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: targetProject, withIntermediateDirectories: true)
+        try Data("payload".utf8).write(to: sourceProject.appendingPathComponent("file.txt", isDirectory: false))
+
+        let configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
+        let persisted = PersistedBatchRun(
+            snapshot: BatchSnapshot(
+                batchID: configuration.batchID,
+                state: .completed,
+                sourceRootPath: sourceRoot.path,
+                destinationRootPath: destinationRoot.path,
+                suffix: configuration.suffix,
+                totalProjects: 1,
+                completedProjects: 1,
+                warningProjects: 0,
+                failedProjects: 0,
+                conflictedProjects: 0,
+                readyForDeletionProjects: 0,
+                currentProjectIndex: nil,
+                currentProjectName: nil,
+                startedAt: Date(timeIntervalSince1970: 10),
+                finishedAt: Date(timeIntervalSince1970: 20),
+                lastError: nil
+            ),
+            projects: [
+                BatchProjectPlan(
+                    id: UUID(),
+                    sourceURL: sourceProject,
+                    destinationRootURL: destinationRoot,
+                    sourceFolderName: "Alpha",
+                    targetFolderName: "Alpha-Lokal",
+                    state: .completed,
+                    detail: "Local rescue finished.",
+                    archiveURL: nil,
+                    deletionManifestURL: nil,
+                    readyForDeletion: false,
+                    startedAt: Date(timeIntervalSince1970: 10),
+                    finishedAt: Date(timeIntervalSince1970: 20)
+                )
+            ],
+            updatedAt: Date(timeIntervalSince1970: 21)
+        )
+        try writePersistedBatch(persisted, to: configuration.resumeStateURL)
+
+        let recorder = BatchUpdateRecorder()
+        let coordinator = BatchCoordinator()
+        await coordinator.revalidateFinishedProjects(
+            configuration: configuration,
+            pauseController: PauseController()
+        ) { update in
+            await recorder.record(update)
+        }
+
+        let batchSnapshot = await recorder.lastBatchSnapshot()
+        XCTAssertEqual(batchSnapshot?.state, .completedWithWarnings)
+        XCTAssertEqual(batchSnapshot?.completedProjects, 0)
+        XCTAssertEqual(batchSnapshot?.warningProjects, 1)
+
+        let plans = await recorder.lastBatchProjects()
+        XCTAssertEqual(plans.first?.state, .completedWithWarnings)
+        XCTAssertTrue(plans.first?.detail?.contains("Revalidation: Warnings:") == true)
+        XCTAssertTrue(plans.first?.detail?.contains("Missing item: file.txt") == true)
+    }
+
     func testDefaultPrefetchCandidatesRespectTransferPolicyExclusions() throws {
         let fileManager = FileManager.default
         let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
