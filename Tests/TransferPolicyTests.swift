@@ -42,4 +42,17 @@ final class TransferPolicyTests: XCTestCase {
 
         XCTAssertEqual(items.map(\.relativePath), ["Sources", "Sources/main.swift"])
     }
+
+    func testCodingProjectModeAllowsExplicitGitExclusion() {
+        let policy = TransferPolicy(
+            mode: .codingProject,
+            customExcludedDirectoryNames: [".git"]
+        )
+
+        XCTAssertEqual(
+            policy.scanDecision(relativePath: ".git", kind: .directory),
+            .excludeDescendants(reason: "Excluded generated directory .git")
+        )
+        XCTAssertFalse(policy.ignoredCustomRules.contains(where: { $0.contains(".git") }))
+    }
 }

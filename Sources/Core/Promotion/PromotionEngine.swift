@@ -5,13 +5,18 @@ actor PromotionEngine {
 
     func prepare(configuration: JobConfiguration) throws -> WorkingDirectories {
         let root = configuration.workingRootURL
+        let assembledContainerRoot = root.appendingPathComponent("assembled", isDirectory: true)
         let directories = WorkingDirectories(
             root: root,
             stagingRoot: root.appendingPathComponent("staging", isDirectory: true),
-            assembledRoot: root.appendingPathComponent("assembled", isDirectory: true).appendingPathComponent(configuration.sourceURL.lastPathComponent, isDirectory: true),
+            assembledRoot: assembledContainerRoot.appendingPathComponent(configuration.sourceURL.lastPathComponent, isDirectory: true),
             archiveRoot: root.appendingPathComponent("archive", isDirectory: true),
             quarantineRoot: root.appendingPathComponent("quarantine", isDirectory: true)
         )
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        for directory in [directories.stagingRoot, assembledContainerRoot, directories.archiveRoot] where fileManager.fileExists(atPath: directory.path) {
+            try fileManager.removeItem(at: directory)
+        }
         try fileManager.createDirectory(at: directories.stagingRoot, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: directories.assembledRoot, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: directories.archiveRoot, withIntermediateDirectories: true)

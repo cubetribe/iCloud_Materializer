@@ -28,7 +28,7 @@ struct RunHealthState: Hashable, Sendable {
         if elapsed >= watchThreshold {
             return RunHealthState(
                 level: .watch,
-                message: "No progress for \(formatDuration(elapsed)). This can still be normal during hydration, verification, or ZIP.",
+                message: "No progress for \(formatDuration(elapsed)). This can still be normal during preflight, discovery, hydration, or verification.",
                 secondsSinceProgress: elapsed
             )
         }

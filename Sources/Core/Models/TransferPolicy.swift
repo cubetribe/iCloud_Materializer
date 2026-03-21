@@ -165,6 +165,16 @@ struct TransferPolicy: Hashable, Sendable {
         }
     }
 
+    var resumeFingerprint: String {
+        let directories = customExcludedDirectoryNames.sorted().joined(separator: ",")
+        let extensions = customExcludedFileExtensions.sorted().joined(separator: ",")
+        return [
+            mode.rawValue,
+            directories,
+            extensions
+        ].joined(separator: "|")
+    }
+
     private var activeExcludedDirectoryNames: Set<String> {
         Self.builtinExcludedDirectoryNames.union(customExcludedDirectoryNames)
     }
@@ -238,7 +248,6 @@ struct TransferPolicy: Hashable, Sendable {
     ]
 
     private static let blockedCustomDirectoryNames: Set<String> = [
-        ".git",
         ".github",
         "src",
         "sources",

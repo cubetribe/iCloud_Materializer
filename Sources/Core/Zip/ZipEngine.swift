@@ -21,7 +21,13 @@ actor ZipEngine {
             hydrationSession: hydrationSession,
             onEvent: { event in
                 switch event {
-                case .evaluating(let item), .ready(let item, _), .deferred(let item, _):
+                case .evaluating(let item),
+                     .requested(let item),
+                     .requestFailed(let item, _),
+                     .downloading(let item),
+                     .stalled(let item),
+                     .ready(let item, _),
+                     .deferred(let item, _):
                     await onProgress(item.relativePath)
                 }
             }

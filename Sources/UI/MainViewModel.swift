@@ -16,18 +16,21 @@ final class MainViewModel {
     var snapshot: JobSnapshot = .idle(source: nil, destination: nil)
     var batchSnapshot: BatchSnapshot = .idle(sourceRoot: nil, destinationRoot: nil, suffix: "Suffix: -Lokal")
     var batchProjects: [BatchProjectPlan] = []
+    var preflightReport: PreflightReport = .empty
+    var confirmedPreflightCheckIDs: Set<String> = []
     var activities: [WorkerActivity] = []
     var logs: [LogEntry] = []
     var failures: [FailureRecord] = []
     var pendingConflict: PromotionConflictState?
-    var workerCount: Int = 4
-    var hydrationWindow: Int = 12
-    var retryCount: Int = 3
+    var workerCount: Int = 2
+    var hydrationWindow: Int = 4
+    var retryCount: Int = 2
     var isPaused = false
     private(set) var lastProgressAt: Date?
 
     private let coordinator = MaterializerCoordinator()
     private let batchCoordinator = BatchCoordinator()
+    private let preflightEngine = PreflightEngine()
     private var pauseController: PauseController?
     private var jobTask: Task<Void, Never>?
     private let maxLogEntries = 400
@@ -45,7 +48,7 @@ final class MainViewModel {
     }
 
     var canStart: Bool {
-        sourceURL != nil && destinationURL != nil && !isRunning
+        sourceURL != nil && destinationURL != nil && !isRunning && preflightReport.canStart
     }
 
     var errorText: String? {
@@ -93,6 +96,7 @@ final class MainViewModel {
             retryCount: 1,
             backoffSchedule: [.seconds(0)],
             maxHydrationWait: .seconds(1),
+            hydrationPrefetchWindow: 0,
             enableFinderFallback: false
         )
         let sample = configuration.targetFolderName(for: "ExampleProject")
@@ -113,6 +117,7 @@ final class MainViewModel {
             retryCount: 1,
             backoffSchedule: [.seconds(0)],
             maxHydrationWait: .seconds(1),
+            hydrationPrefetchWindow: 0,
             enableFinderFallback: false
         )
         return configuration.namingSummary
@@ -141,6 +146,11 @@ final class MainViewModel {
     func start() {
         guard let sourceURL, let destinationURL else {
             snapshot.lastError = PipelineError.missingFolderSelection.localizedDescription
+            return
+        }
+        refreshPreflight()
+        guard preflightReport.canStart else {
+            snapshot.lastError = preflightReport.blockingSummary ?? "Resolve the required preflight checks before starting."
             return
         }
 
@@ -200,7 +210,17 @@ final class MainViewModel {
         }
     }
 
+    func setPreflightConfirmation(id: String, isConfirmed: Bool) {
+        if isConfirmed {
+            confirmedPreflightCheckIDs.insert(id)
+        } else {
+            confirmedPreflightCheckIDs.remove(id)
+        }
+        refreshPreflight()
+    }
+
     func rebuildBatchPreview() {
+        refreshPreflight()
         guard runMode == .batchQueue else {
             batchProjects = []
             batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchNamingSummary)
@@ -241,17 +261,27 @@ final class MainViewModel {
     }
 
     private func startSingleRun(sourceURL: URL, destinationURL: URL, allowTargetQuarantine: Bool) {
-        let configuration = JobConfiguration(
-            jobID: UUID(),
+        let resumeJobID = JobConfiguration.resumeJobID(
             sourceURL: sourceURL,
             destinationURL: destinationURL,
+            targetFolderName: nil,
+            transferPolicy: transferPolicy
+        )
+        let configuration = JobConfiguration(
+            jobID: resumeJobID,
+            sourceURL: sourceURL,
+            destinationURL: destinationURL,
+            preflightReport: preflightReport,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
-            workerCount: max(2, min(workerCount, 6)),
-            hydrationWindow: max(4, min(hydrationWindow, 24)),
+            workerCount: max(1, min(workerCount, 4)),
+            hydrationWindow: max(2, min(hydrationWindow, 8)),
             retryCount: max(1, retryCount),
             backoffSchedule: [.seconds(0), .seconds(2), .seconds(5), .seconds(15)],
             maxHydrationWait: .seconds(300),
+            shouldCreateArchive: false,
+            hydrationPrefetchWindow: 0,
+            hydrationHotSlotDuration: .seconds(6),
             allowTargetQuarantine: allowTargetQuarantine,
             enableFinderFallback: true
         )
@@ -288,12 +318,15 @@ final class MainViewModel {
             suffix: batchSuffix,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
-            workerCount: max(2, min(workerCount, 6)),
-            hydrationWindow: max(4, min(hydrationWindow, 24)),
+            workerCount: max(1, min(workerCount, 4)),
+            hydrationWindow: max(2, min(hydrationWindow, 8)),
             retryCount: max(1, retryCount),
             backoffSchedule: [.seconds(0), .seconds(2), .seconds(5), .seconds(15)],
             maxHydrationWait: .seconds(300),
-            enableFinderFallback: true
+            shouldCreateArchive: false,
+            hydrationPrefetchWindow: 0,
+            enableFinderFallback: true,
+            projectPrefetchWindow: 0
         )
     }
 
@@ -302,6 +335,7 @@ final class MainViewModel {
         activities.removeAll()
         failures.removeAll()
         snapshot = .idle(source: sourceURL, destination: destinationURL)
+        snapshot.preflightReport = preflightReport
         batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchNamingSummary)
         pauseController = PauseController()
         isPaused = false
@@ -347,6 +381,8 @@ final class MainViewModel {
     private func refreshIdleSnapshot() {
         snapshot = .idle(source: sourceURL, destination: destinationURL)
         snapshot.lastError = nil
+        refreshPreflight()
+        snapshot.preflightReport = preflightReport
         activities = []
         batchSnapshot = .idle(sourceRoot: sourceURL, destinationRoot: destinationURL, suffix: batchNamingSummary)
         batchProjects = []
@@ -354,6 +390,15 @@ final class MainViewModel {
         if runMode == .batchQueue {
             rebuildBatchPreview()
         }
+    }
+
+    private func refreshPreflight() {
+        preflightReport = preflightEngine.evaluate(
+            sourceURL: sourceURL,
+            destinationURL: destinationURL,
+            transferPolicy: transferPolicy,
+            confirmations: confirmedPreflightCheckIDs
+        )
     }
 
     private func snapshotHasProgress(from old: JobSnapshot, to new: JobSnapshot) -> Bool {
@@ -366,6 +411,8 @@ final class MainViewModel {
         old.totalFailed != new.totalFailed ||
         old.processedChunks != new.processedChunks ||
         old.activeWorkerCount != new.activeWorkerCount ||
+        old.preflightReport != new.preflightReport ||
+        old.hydrationMetrics != new.hydrationMetrics ||
         old.finishedAt != new.finishedAt ||
         old.lastError != new.lastError
     }

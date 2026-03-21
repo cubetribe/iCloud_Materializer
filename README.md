@@ -14,13 +14,16 @@ Implemented today:
 - single-project runs
 - batch queue runs over direct child folders
 - SQLite-backed per-job state
-- staged copy, verification, promotion, and ZIP creation
-- live telemetry, logs, failures, and stall warnings
+- mandatory preflight before rescue runs start
+- shallow-first discovery, hydration, staged copy, verification, and promotion
+- live telemetry, logs, failures, stall warnings, and hydration-state timing
 - transfer scope presets for exact copies vs. coding-project copies
 - priority presets for critical files first
 - batch resume state and deletion manifests for later manual review
+- conservative default concurrency for rescue stability
 
 Not implemented yet:
+- automatic ZIP creation in the default rescue path
 - automatic source deletion
 - a dedicated deletion review/execute UI
 - App Sandbox and security-scoped bookmarks
@@ -30,16 +33,30 @@ Not implemented yet:
 
 For a single project run, the app executes this pipeline:
 
-1. scan the full source tree, including hidden files and dotfiles
-2. detect iCloud ubiquitous items and hydrate placeholders as needed
-3. plan chunked work units, including earlier splitting of hydration-heavy directories so multiple workers can stay busy
-4. copy each chunk into an internal staging area
-5. verify staged and assembled output by path count and file sizes
-6. promote the assembled tree into the visible destination
-7. verify the visible destination again
-8. create a ZIP of the source only after verification passes
+1. run a mandatory preflight and block the start until required checks are green
+2. discover top-level entries first instead of waiting for a whole-tree scan
+3. hydrate cold iCloud items with explicit queued/downloading/stalled/request-failed state tracking
+4. plan smaller work units so ready files can move while colder items continue hydrating
+5. copy each chunk into an internal staging area
+6. verify staged and assembled output by path count and file sizes
+7. promote the assembled tree into the visible destination
+8. verify the visible destination again
+9. stop after the verified local copy is complete; ZIP creation is a later manual follow-up
 
 For batch runs, the selected source root is treated as a queue of independent project runs. Each direct subfolder becomes its own isolated project job.
+
+## Preflight
+
+The rescue preflight is mandatory. The app will not start a run until required checks are resolved or explicitly confirmed.
+
+Preflight currently covers:
+- readable source root
+- writable local destination
+- destination outside likely iCloud Drive paths
+- destination free-space thresholds
+- top-level source availability to catch cloud-only folders early
+- a scan-risk warning for `.git/objects`
+- manual confirmations for `Sync this Mac`, Finder `Keep Downloaded`, permissions, and competing sync tools
 
 ## Safety Model
 
@@ -51,8 +68,9 @@ The app is intentionally conservative.
 - single-project runs can quarantine an existing target only after explicit approval
 - batch runs skip conflicting projects instead of merging into them
 - the visible destination is verified after promotion, not just the internal assembled tree
-- ZIP creation happens only after a successful visible-target verification
-- batch archive/deletion preparation only creates manifests for later manual review
+- the default rescue path completes after a successful visible-target verification
+- automatic ZIP creation is disabled by default so the critical path stays focused on getting the local copy back first
+- batch archive/deletion preparation only creates manifests for later manual review when archive creation is enabled again
 
 ## Run Modes
 
@@ -70,6 +88,10 @@ Internal runtime artifacts:
 - `<destination>/.icloud-materializer/<job-id>/archive/`
 - `<destination>/.icloud-materializer/<job-id>/quarantine/`
 
+Retry behavior:
+- rerunning the same source, destination, and transfer-scope combination reuses the same rescue job identity
+- if a previous single-project run already discovered the tree, the next retry can reuse that persisted inventory instead of starting from a full rescan
+
 ### Batch Queue
 
 Use `Batch Queue` when you want to process all direct subfolders under one source root.
@@ -77,8 +99,8 @@ Use `Batch Queue` when you want to process all direct subfolders under one sourc
 Behavior:
 - each direct child folder becomes its own isolated project run
 - `_Materializer_Archives` and `.icloud-materializer` are ignored as source children
-- each project produces its own local copy, ZIP, and optional deletion manifest
-- the next few project roots are prewarmed in the background to reduce hydration idle time between batch items
+- each project produces its own local copy; archive/deletion review is no longer part of the default critical path
+- project-root prewarming is disabled by default for rescue runs
 - completed batch projects can be resumed or skipped on later reruns when their expected outputs still exist
 
 Batch runtime artifacts:
@@ -114,7 +136,7 @@ Built-in exclusions include:
 - generated build/tooling directories such as `.gradle`, `.dart_tool`, `DerivedData`
 - generated files such as `.DS_Store`, `Thumbs.db`, `.pyc`, `.pyo`
 
-Custom directory-name and file-extension exclusions are supported, but the app blocks risky custom rules that would exclude core source or repo structure such as `.git`, `src`, `tests`, or common source file extensions.
+Custom directory-name and file-extension exclusions are supported, but the app still blocks risky custom rules that would exclude core source paths such as `src`, `tests`, or common source file extensions. `.git` is the one notable exception now, because explicitly skipping Git object history can be the right tradeoff for a rescue run when discovery time dominates.
 
 ## Copy Priority
 
@@ -137,14 +159,16 @@ This mode is useful when you need the project to become operational before every
 ## Telemetry And Recovery Signals
 
 The UI exposes:
+- preflight status and required confirmations
 - current phase and current path
 - discovered, downloaded, copied, and failed counts
 - throughput in items per second and bytes per second
 - chunk progress
+- hydration request, failure, queued, ready, and stalled counts
 - live worker activity
 - live event stream
 - failure list
-- estimated remaining work after the scan has enough information
+- estimated remaining work after discovery has enough information
 - run-health warnings when there has been no progress for 90 seconds or more
 
 Run-health thresholds:
@@ -200,11 +224,12 @@ The generated Xcode project should be treated as derived from [project.yml](proj
 
 ## Known Limitations
 
-- source deletion is still a manual follow-up step; the app only prepares deletion manifests
+- source deletion is still a manual follow-up step; the app only prepares deletion manifests when archive creation is enabled
 - there is no dedicated deletion review or execute workflow yet
 - Finder fallback can still be fragile on very large or changing trees because it depends on macOS Automation and Finder stability
-- throughput depends heavily on iCloud/File Provider behavior; larger hydration windows and project-root prewarming help, but pushing concurrency too far can still destabilize long runs
-- batch copy is still promoted one project at a time; the speed-up comes from earlier hydration and better worker saturation, not from unsafe final-target merging
+- throughput depends heavily on iCloud/File Provider behavior; this version deliberately starts with conservative concurrency and favors predictability over saturation
+- batch copy is still promoted one project at a time; the speed-up now comes mainly from shallow-first discovery, earlier usable progress, and fewer cold items blocking hot work
+- single-project retries can reuse persisted discovery inventory, but they do not yet resume already copied/promoted chunk state at sub-phase granularity
 - the current batch resume model is queue-oriented; it does not yet expose a dedicated UI for repairing a partially successful single project at sub-phase granularity
 - no CI pipeline is configured yet, so validation is currently local via `xcodebuild`
 

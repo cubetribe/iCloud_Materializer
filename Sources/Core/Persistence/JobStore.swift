@@ -35,6 +35,8 @@ actor JobStore {
             copied_bytes INTEGER NOT NULL DEFAULT 0,
             active_worker_count INTEGER NOT NULL DEFAULT 0,
             estimated_remaining_seconds REAL,
+            preflight_report_json TEXT,
+            hydration_metrics_json TEXT,
             started_at REAL,
             finished_at REAL,
             last_error TEXT
@@ -50,7 +52,9 @@ actor JobStore {
                 "total_expected_bytes": "INTEGER NOT NULL DEFAULT 0",
                 "copied_bytes": "INTEGER NOT NULL DEFAULT 0",
                 "active_worker_count": "INTEGER NOT NULL DEFAULT 0",
-                "estimated_remaining_seconds": "REAL"
+                "estimated_remaining_seconds": "REAL",
+                "preflight_report_json": "TEXT",
+                "hydration_metrics_json": "TEXT"
             ],
             db: db
         )
@@ -65,11 +69,21 @@ actor JobStore {
             local_ready INTEGER NOT NULL,
             download_status TEXT,
             symlink_destination TEXT,
+            hydration_state TEXT,
+            hydration_error TEXT,
             state TEXT NOT NULL,
             last_error TEXT,
             PRIMARY KEY (job_id, relative_path)
         );
         """, db: db)
+        try Self.ensureColumns(
+            in: "items",
+            definitions: [
+                "hydration_state": "TEXT",
+                "hydration_error": "TEXT"
+            ],
+            db: db
+        )
         try Self.execute("""
         CREATE TABLE IF NOT EXISTS chunks (
             job_id TEXT NOT NULL,
@@ -124,11 +138,17 @@ actor JobStore {
         }
         let sql = """
         INSERT OR REPLACE INTO jobs
-        (job_id, phase, phase_detail, source_path, destination_path, current_path, total_discovered, total_downloaded, total_copied, total_failed, planned_chunks, processed_chunks, estimated_remaining, throughput, throughput_bytes, total_expected_bytes, copied_bytes, active_worker_count, estimated_remaining_seconds, started_at, finished_at, last_error)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        (job_id, phase, phase_detail, source_path, destination_path, current_path, total_discovered, total_downloaded, total_copied, total_failed, planned_chunks, processed_chunks, estimated_remaining, throughput, throughput_bytes, total_expected_bytes, copied_bytes, active_worker_count, estimated_remaining_seconds, preflight_report_json, hydration_metrics_json, started_at, finished_at, last_error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         let startedAt = snapshot.startedAt?.timeIntervalSince1970
         let finishedAt = snapshot.finishedAt?.timeIntervalSince1970
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let preflightJSON = try snapshot.preflightReport.map { report in
+            String(decoding: try encoder.encode(report), as: UTF8.self)
+        }
+        let hydrationMetricsJSON = String(decoding: try encoder.encode(snapshot.hydrationMetrics), as: UTF8.self)
         try prepareAndStep(sql) { statement in
             bind(snapshot.jobID.uuidString, to: 1, in: statement)
             bind(snapshot.phase.rawValue, to: 2, in: statement)
@@ -149,9 +169,11 @@ actor JobStore {
             sqlite3_bind_int64(statement, 17, sqlite3_int64(snapshot.copiedBytes))
             sqlite3_bind_int64(statement, 18, sqlite3_int64(snapshot.activeWorkerCount))
             bind(snapshot.estimatedRemainingSeconds, to: 19, in: statement)
-            bind(startedAt, to: 20, in: statement)
-            bind(finishedAt, to: 21, in: statement)
-            bind(snapshot.lastError, to: 22, in: statement)
+            bind(preflightJSON, to: 20, in: statement)
+            bind(hydrationMetricsJSON, to: 21, in: statement)
+            bind(startedAt, to: 22, in: statement)
+            bind(finishedAt, to: 23, in: statement)
+            bind(snapshot.lastError, to: 24, in: statement)
         }
     }
 
@@ -161,8 +183,8 @@ actor JobStore {
         }
         let sql = """
         INSERT OR REPLACE INTO items
-        (job_id, relative_path, kind, size, hidden, ubiquitous, local_ready, download_status, symlink_destination, state, last_error)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        (job_id, relative_path, kind, size, hidden, ubiquitous, local_ready, download_status, symlink_destination, hydration_state, hydration_error, state, last_error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         try Self.execute("BEGIN TRANSACTION;", db: db)
         defer { try? Self.execute("COMMIT;", db: db) }
@@ -177,10 +199,52 @@ actor JobStore {
                 sqlite3_bind_int(statement, 7, item.isLocalReady ? 1 : 0)
                 bind(item.downloadStatusRaw, to: 8, in: statement)
                 bind(item.symlinkDestination, to: 9, in: statement)
-                bind(item.state.rawValue, to: 10, in: statement)
-                bind(item.lastError, to: 11, in: statement)
+                bind(item.hydrationState.rawValue, to: 10, in: statement)
+                bind(item.hydrationError, to: 11, in: statement)
+                bind(item.state.rawValue, to: 12, in: statement)
+                bind(item.lastError, to: 13, in: statement)
             }
         }
+    }
+
+    func loadItems(jobID: UUID) throws -> [ScannedItem] {
+        guard db != nil else {
+            throw PipelineError.persistenceFailed("Database connection is closed.")
+        }
+        let sql = """
+        SELECT relative_path, kind, size, hidden, ubiquitous, local_ready, download_status, symlink_destination, hydration_state, hydration_error, state, last_error
+        FROM items
+        WHERE job_id = ?
+        ORDER BY relative_path ASC;
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw PipelineError.persistenceFailed(Self.lastErrorMessage(db: db))
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(jobID.uuidString, to: 1, in: statement)
+
+        var items: [ScannedItem] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            items.append(
+                ScannedItem(
+                    id: UUID(),
+                    relativePath: string(at: 0, in: statement) ?? "",
+                    kind: ItemKind(rawValue: string(at: 1, in: statement) ?? ItemKind.file.rawValue) ?? .file,
+                    expectedSize: sqlite3_column_int64(statement, 2),
+                    isHidden: sqlite3_column_int(statement, 3) != 0,
+                    isUbiquitous: sqlite3_column_int(statement, 4) != 0,
+                    isLocalReady: sqlite3_column_int(statement, 5) != 0,
+                    downloadStatusRaw: string(at: 6, in: statement),
+                    symlinkDestination: string(at: 7, in: statement),
+                    hydrationState: HydrationState(rawValue: string(at: 8, in: statement) ?? HydrationState.ready.rawValue) ?? .ready,
+                    hydrationError: string(at: 9, in: statement),
+                    state: ItemState(rawValue: string(at: 10, in: statement) ?? ItemState.pending.rawValue) ?? .pending,
+                    lastError: string(at: 11, in: statement)
+                )
+            )
+        }
+        return items
     }
 
     func saveChunks(jobID: UUID, chunks: [ChunkManifest]) throws {
@@ -255,7 +319,7 @@ actor JobStore {
             throw PipelineError.persistenceFailed("Database connection is closed.")
         }
         let sql = """
-        SELECT phase, phase_detail, source_path, destination_path, current_path, total_discovered, total_downloaded, total_copied, total_failed, planned_chunks, processed_chunks, estimated_remaining, throughput, throughput_bytes, total_expected_bytes, copied_bytes, active_worker_count, estimated_remaining_seconds, started_at, finished_at, last_error
+        SELECT phase, phase_detail, source_path, destination_path, current_path, total_discovered, total_downloaded, total_copied, total_failed, planned_chunks, processed_chunks, estimated_remaining, throughput, throughput_bytes, total_expected_bytes, copied_bytes, active_worker_count, estimated_remaining_seconds, preflight_report_json, hydration_metrics_json, started_at, finished_at, last_error
         FROM jobs WHERE job_id = ? LIMIT 1;
         """
         var statement: OpaquePointer?
@@ -268,6 +332,10 @@ actor JobStore {
             return nil
         }
         let phase = JobPhase(rawValue: string(at: 0, in: statement) ?? JobPhase.idle.rawValue) ?? .idle
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let preflightReport = try decodedValue(PreflightReport.self, from: string(at: 18, in: statement), decoder: decoder)
+        let hydrationMetrics = try decodedValue(HydrationMetrics.self, from: string(at: 19, in: statement), decoder: decoder) ?? HydrationMetrics()
         return JobSnapshot(
             jobID: jobID,
             phase: phase,
@@ -288,9 +356,11 @@ actor JobStore {
             copiedBytes: sqlite3_column_int64(statement, 15),
             activeWorkerCount: Int(sqlite3_column_int64(statement, 16)),
             estimatedRemainingSeconds: double(at: 17, in: statement),
-            startedAt: date(at: 18, in: statement),
-            finishedAt: date(at: 19, in: statement),
-            lastError: string(at: 20, in: statement)
+            preflightReport: preflightReport,
+            hydrationMetrics: hydrationMetrics,
+            startedAt: date(at: 20, in: statement),
+            finishedAt: date(at: 21, in: statement),
+            lastError: string(at: 22, in: statement)
         )
     }
 
@@ -373,6 +443,15 @@ actor JobStore {
     private func double(at index: Int32, in statement: OpaquePointer?) -> Double? {
         guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
         return sqlite3_column_double(statement, index)
+    }
+
+    private func decodedValue<T: Decodable>(
+        _ type: T.Type,
+        from value: String?,
+        decoder: JSONDecoder
+    ) throws -> T? {
+        guard let value else { return nil }
+        return try decoder.decode(T.self, from: Data(value.utf8))
     }
 
     private static let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)

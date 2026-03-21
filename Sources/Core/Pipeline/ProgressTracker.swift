@@ -3,6 +3,7 @@ import Foundation
 actor ProgressTracker {
     private var snapshot: JobSnapshot
     private var activities: [UUID: WorkerActivity] = [:]
+    private var hydrationStates: [String: HydrationState] = [:]
     private let store: JobStore
     private let onUpdate: @Sendable (JobUpdate) async -> Void
     private var lastPublishedAt: Date = .distantPast
@@ -18,21 +19,59 @@ actor ProgressTracker {
         self.onUpdate = onUpdate
     }
 
+    func recordPreflight(_ report: PreflightReport) async throws {
+        snapshot.phase = .preflight
+        snapshot.phaseDetail = report.canStart ? "Preflight passed" : "Preflight needs attention"
+        snapshot.currentPath = nil
+        snapshot.preflightReport = report
+        recalculateRates()
+        try await publish(force: true)
+    }
+
     func begin(detail: String, path: String?) async throws {
-        snapshot.phase = .scanning
+        snapshot.phase = .discovering
         snapshot.phaseDetail = detail
         snapshot.currentPath = path
         try await publish(force: true)
     }
 
+    func restoreDiscoveredItems(_ items: [ScannedItem], detail: String) async throws {
+        snapshot.phase = .discovering
+        snapshot.phaseDetail = detail
+        snapshot.currentPath = nil
+        snapshot.totalDiscovered = items.count
+        snapshot.totalDownloaded = 0
+        snapshot.totalCopied = 0
+        snapshot.totalFailed = 0
+        snapshot.plannedChunks = 0
+        snapshot.processedChunks = 0
+        snapshot.estimatedRemainingCount = items.count
+        snapshot.totalExpectedBytes = items.expectedBytes
+        snapshot.copiedBytes = 0
+        snapshot.activeWorkerCount = 0
+        snapshot.finishedAt = nil
+        snapshot.lastError = nil
+        hydrationStates = Dictionary(uniqueKeysWithValues: items.map { ($0.relativePath, $0.hydrationState) })
+        snapshot.hydrationMetrics = HydrationMetrics(timeToFirstDiscoveredSeconds: 0)
+        recalculateHydrationMetrics()
+        recalculateRates()
+        try await publish(force: true)
+    }
+
     func scanned(_ item: ScannedItem) async throws {
-        snapshot.phase = .scanning
-        snapshot.phaseDetail = "Scanning source tree"
+        snapshot.phase = .discovering
+        snapshot.phaseDetail = "Discovering source tree"
         snapshot.currentPath = item.relativePath
         snapshot.totalDiscovered += 1
+        if snapshot.hydrationMetrics.timeToFirstDiscoveredSeconds == nil,
+           let startedAt = snapshot.startedAt {
+            snapshot.hydrationMetrics.timeToFirstDiscoveredSeconds = Date().timeIntervalSince(startedAt)
+        }
         if item.kind == .file {
             snapshot.totalExpectedBytes += item.expectedSize
         }
+        hydrationStates[item.relativePath] = item.hydrationState
+        recalculateHydrationMetrics()
         snapshot.estimatedRemainingCount = 0
         recalculateRates()
         try await publish(force: false)
@@ -40,9 +79,9 @@ actor ProgressTracker {
 
     func planned(chunkCount: Int) async throws {
         snapshot.phase = .planningChunks
-        snapshot.phaseDetail = "Planned \(chunkCount) chunks"
+        snapshot.phaseDetail = "Planned \(snapshot.plannedChunks + chunkCount) chunks"
         snapshot.currentPath = nil
-        snapshot.plannedChunks = chunkCount
+        snapshot.plannedChunks += chunkCount
         snapshot.estimatedRemainingCount = max(0, snapshot.totalDiscovered - snapshot.totalCopied - snapshot.totalFailed)
         recalculateRates()
         try await publish(force: true)
@@ -71,6 +110,7 @@ actor ProgressTracker {
             path: path,
             updatedAt: Date()
         )
+        snapshot.phase = jobPhase(for: phase)
         snapshot.currentPath = path ?? snapshot.currentPath
         snapshot.phaseDetail = detail
         snapshot.activeWorkerCount = activities.count
@@ -85,11 +125,26 @@ actor ProgressTracker {
         try await publish(force: false)
     }
 
-    func markDownloadReady(item: ScannedItem, downloaded: Bool) async throws {
+    func markHydrationEvent(item: ScannedItem, downloaded: Bool = false) async throws {
         snapshot.currentPath = item.relativePath
         if downloaded {
             snapshot.totalDownloaded += 1
         }
+        hydrationStates[item.relativePath] = item.hydrationState
+        if item.hydrationState == .ready,
+           snapshot.hydrationMetrics.timeToFirstReadySeconds == nil,
+           let startedAt = snapshot.startedAt {
+            snapshot.hydrationMetrics.timeToFirstReadySeconds = Date().timeIntervalSince(startedAt)
+        }
+        if (.queued == item.hydrationState || .downloading == item.hydrationState),
+           snapshot.hydrationMetrics.timeToFirstHydrationRequestSeconds == nil,
+           let startedAt = snapshot.startedAt {
+            snapshot.hydrationMetrics.timeToFirstHydrationRequestSeconds = Date().timeIntervalSince(startedAt)
+        }
+        if item.hydrationState == .requestFailed {
+            snapshot.lastError = item.hydrationError ?? snapshot.lastError
+        }
+        recalculateHydrationMetrics()
         recalculateRates()
         try await publish(force: false)
     }
@@ -97,6 +152,10 @@ actor ProgressTracker {
     func markCopied(item: ScannedItem) async throws {
         snapshot.currentPath = item.relativePath
         snapshot.totalCopied += 1
+        if snapshot.hydrationMetrics.timeToFirstCopiedSeconds == nil,
+           let startedAt = snapshot.startedAt {
+            snapshot.hydrationMetrics.timeToFirstCopiedSeconds = Date().timeIntervalSince(startedAt)
+        }
         if item.kind == .file {
             snapshot.copiedBytes += item.expectedSize
         }
@@ -115,6 +174,10 @@ actor ProgressTracker {
 
     func markChunkFinished() async throws {
         snapshot.processedChunks += 1
+        if snapshot.hydrationMetrics.timeToFirstVerifiedChunkSeconds == nil,
+           let startedAt = snapshot.startedAt {
+            snapshot.hydrationMetrics.timeToFirstVerifiedChunkSeconds = Date().timeIntervalSince(startedAt)
+        }
         recalculateRates()
         try await publish(force: true)
     }
@@ -191,7 +254,7 @@ actor ProgressTracker {
         snapshot.throughputItemsPerSecond = Double(snapshot.totalCopied) / elapsed
         snapshot.throughputBytesPerSecond = Double(snapshot.copiedBytes) / elapsed
 
-        if snapshot.phase == .scanning || snapshot.phase == .planningChunks {
+        if snapshot.phase == .preflight || snapshot.phase == .discovering || snapshot.phase == .planningChunks {
             snapshot.estimatedRemainingSeconds = nil
             return
         }
@@ -202,5 +265,39 @@ actor ProgressTracker {
             return
         }
         snapshot.estimatedRemainingSeconds = Double(remainingItems) / snapshot.throughputItemsPerSecond
+    }
+
+    private func recalculateHydrationMetrics() {
+        snapshot.hydrationMetrics.requestAttemptCount = hydrationStates.values.filter {
+            $0 == .queued || $0 == .downloading || $0 == .stalled || $0 == .ready || $0 == .requestFailed
+        }.count
+        snapshot.hydrationMetrics.requestFailureCount = hydrationStates.values.filter { $0 == .requestFailed }.count
+        snapshot.hydrationMetrics.queuedCount = hydrationStates.values.filter { $0 == .queued }.count
+        snapshot.hydrationMetrics.downloadingCount = hydrationStates.values.filter { $0 == .downloading }.count
+        snapshot.hydrationMetrics.stalledCount = hydrationStates.values.filter { $0 == .stalled }.count
+        snapshot.hydrationMetrics.readyCount = hydrationStates.values.filter { $0 == .ready }.count
+    }
+
+    private func jobPhase(for livePhase: LiveActivityPhase) -> JobPhase {
+        switch livePhase {
+        case .preflight:
+            return .preflight
+        case .discovering, .scanning:
+            return .discovering
+        case .planning:
+            return .planningChunks
+        case .hydrating, .materializing:
+            return .hydrating
+        case .copying:
+            return .copying
+        case .verifying:
+            return .verifyingChunks
+        case .promoting:
+            return .promoting
+        case .zipping:
+            return .zipping
+        case .idle:
+            return snapshot.phase
+        }
     }
 }

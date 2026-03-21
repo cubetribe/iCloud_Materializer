@@ -288,7 +288,9 @@ final class BatchCoordinator: @unchecked Sendable {
                 targetFolderName: targetFolderName,
                 state: hasConflict ? .conflicted : .pending,
                 detail: hasConflict ? "Target already exists: \(targetURL.path)" : nil,
-                archiveURL: configuration.archiveRootURL.appendingPathComponent("\(projectURL.lastPathComponent).zip", isDirectory: false),
+                archiveURL: configuration.shouldCreateArchive
+                    ? configuration.archiveRootURL.appendingPathComponent("\(projectURL.lastPathComponent).zip", isDirectory: false)
+                    : nil,
                 deletionManifestURL: configuration.deletionManifestRootURL.appendingPathComponent("\(projectURL.lastPathComponent).json", isDirectory: false),
                 readyForDeletion: false,
                 startedAt: nil,
@@ -308,11 +310,19 @@ final class BatchCoordinator: @unchecked Sendable {
             guard let persistedProject = persistedBySourcePath[project.sourceURL.standardizedFileURL.path] else {
                 return project
             }
-            return merge(fresh: project, persisted: persistedProject)
+            return merge(
+                fresh: project,
+                persisted: persistedProject,
+                shouldCreateArchive: configuration.shouldCreateArchive
+            )
         }
     }
 
-    private func merge(fresh: BatchProjectPlan, persisted: BatchProjectPlan) -> BatchProjectPlan {
+    private func merge(
+        fresh: BatchProjectPlan,
+        persisted: BatchProjectPlan,
+        shouldCreateArchive: Bool
+    ) -> BatchProjectPlan {
         var merged = fresh
         merged.id = persisted.id
         merged.startedAt = persisted.startedAt
@@ -325,12 +335,16 @@ final class BatchCoordinator: @unchecked Sendable {
         case .completed:
             if isRestorableCompleted(persisted) {
                 merged.state = .completed
-                merged.readyForDeletion = true
+                merged.readyForDeletion = shouldCreateArchive ? persisted.readyForDeletion : false
                 merged.detail = sanitizedDetail(persisted.detail)
+                if !shouldCreateArchive {
+                    let suffix = "Automatic archive creation is disabled during rescue mode. Source deletion review remains off."
+                    merged.detail = [merged.detail, suffix].compactMap { $0 }.joined(separator: "\n")
+                }
             } else {
                 merged.state = .failed
                 merged.readyForDeletion = false
-                merged.detail = "Persisted completed state is no longer valid. Required target, archive, or deletion manifest is missing; the project will rerun."
+                merged.detail = "Persisted completed state is no longer valid. The local target is missing, so the project will rerun."
             }
         case .conflicted:
             merged.state = fresh.state == .conflicted ? .conflicted : .pending
@@ -424,10 +438,7 @@ final class BatchCoordinator: @unchecked Sendable {
 
     private func isRestorableCompleted(_ project: BatchProjectPlan) -> Bool {
         project.state == .completed &&
-        project.readyForDeletion &&
-        fileManager.fileExists(atPath: project.targetURL.path) &&
-        project.archiveURL.map { fileManager.fileExists(atPath: $0.path) } == true &&
-        project.deletionManifestURL.map { fileManager.fileExists(atPath: $0.path) } == true
+        fileManager.fileExists(atPath: project.targetURL.path)
     }
 
     private func validateRoots(configuration: BatchConfiguration) throws {
@@ -443,7 +454,9 @@ final class BatchCoordinator: @unchecked Sendable {
     }
 
     private func prepareBatchArtifacts(configuration: BatchConfiguration) throws {
-        try fileManager.createDirectory(at: configuration.archiveRootURL, withIntermediateDirectories: true)
+        if configuration.shouldCreateArchive {
+            try fileManager.createDirectory(at: configuration.archiveRootURL, withIntermediateDirectories: true)
+        }
         try fileManager.createDirectory(at: configuration.deletionManifestRootURL, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: configuration.resumeRootURL, withIntermediateDirectories: true)
     }
@@ -485,6 +498,12 @@ final class BatchCoordinator: @unchecked Sendable {
         configuration: BatchConfiguration,
         localCopyURL: URL
     ) throws {
+        guard configuration.shouldCreateArchive else {
+            project.readyForDeletion = false
+            let suffix = "Automatic archive creation is disabled during rescue mode. Source deletion review remains off."
+            project.detail = [project.detail, suffix].compactMap { $0 }.joined(separator: "\n")
+            return
+        }
         guard let archiveURL = project.archiveURL, fileManager.fileExists(atPath: archiveURL.path) else {
             if project.state == .completed {
                 project.state = .completedWithWarnings

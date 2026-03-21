@@ -20,6 +20,9 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Batch resume state persisted under the destination-side `.icloud-materializer` workspace.
 - Batch deletion manifests for explicit later review before any source cleanup.
 - Session findings document in [iCloud_Migration_Findings.md](iCloud_Migration_Findings.md).
+- Mandatory rescue preflight with manual Finder/system confirmations, free-space checks, local destination validation, and `.git` scan-risk warnings.
+- Hydration-state telemetry and persisted per-item hydration diagnostics for request failures, queued/downloading items, stalls, and first-useful-progress timings.
+- Single-project retry resume that can reuse previously persisted discovery inventory instead of rescanning from scratch.
 
 ### Changed
 - Final completion now depends on verifying the visible promoted target, not only the internal assembled tree.
@@ -30,6 +33,10 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Hydration now uses a bounded prefetch buffer ahead of active slots so iCloud downloads can be requested earlier without letting the queue grow unbounded.
 - Batch prewarm now touches each upcoming project root plus a small set of direct children so directory-local iCloud content starts hydrating sooner, and resumed runs can prewarm those projects again.
 - README expanded into an operational guide covering run modes, safety model, runtime artifacts, resume behavior, and repo relocation.
+- Rescue runs now begin with `preflight -> shallow discovery -> hydration -> copy/verify/promote` instead of waiting for a whole-tree scan and chunk plan before the first useful copy work.
+- Automatic ZIP creation is now disabled in the default rescue path so success means a verified local copy first; archive creation is deferred to a later manual step.
+- Coding Project mode now allows an explicit custom `.git` exclusion so Git object stores can be skipped when scan time dominates rescue progress.
+- Rescue-mode batch previews no longer keep advertising deletion readiness when archive creation is disabled.
 
 ### Fixed
 - Restored and re-validated the batch queue implementation after workspace recovery.
@@ -37,3 +44,4 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Improved batch target naming so naming strategy is explicit and previewed before runs start.
 - Added a planner safety budget so pathological directory shapes cannot leave long batch runs spinning indefinitely in `planningChunks`.
 - Replaced Finder-scripted recovery copies with a cancellable `ditto`-based recovery path so aborting a batch no longer leaves delayed system-level copy jobs running in the background.
+- Removed silent iCloud download-request failures so rejected hydration requests surface immediately in logs, state, and failure handling.

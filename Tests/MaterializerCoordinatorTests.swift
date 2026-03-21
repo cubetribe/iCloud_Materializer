@@ -2,7 +2,7 @@ import XCTest
 @testable import iCloudMaterializer
 
 final class MaterializerCoordinatorTests: XCTestCase {
-    func testCoordinatorCompletesAndVerifiesVisibleTargetForLocalTree() async throws {
+    func testCoordinatorCompletesAndVerifiesVisibleTargetForLocalTreeWithoutAutomaticZip() async throws {
         let fileManager = FileManager.default
         let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let sourceRoot = workspace.appendingPathComponent("SourceProject", isDirectory: true)
@@ -31,12 +31,86 @@ final class MaterializerCoordinatorTests: XCTestCase {
         XCTAssertEqual(verification.verifiedCount, expectedItems.count)
 
         let zipURL = sourceRoot.appendingPathComponent("\(sourceRoot.lastPathComponent).zip", isDirectory: false)
-        XCTAssertTrue(fileManager.fileExists(atPath: zipURL.path))
-        let zipSize = try XCTUnwrap((try fileManager.attributesOfItem(atPath: zipURL.path)[.size] as? NSNumber)?.int64Value)
-        XCTAssertGreaterThan(zipSize, 0)
+        XCTAssertFalse(fileManager.fileExists(atPath: zipURL.path))
 
         let logMessages = await recorder.logMessages()
         XCTAssertTrue(logMessages.contains(where: { $0.contains("Verified visible target:") }))
+        XCTAssertTrue(logMessages.contains(where: { $0.contains("Skipping automatic ZIP creation") }))
+    }
+
+    func testCoordinatorCreatesArchiveWhenExplicitlyEnabled() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("SourceProject", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("Destination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try createFixture(at: sourceRoot)
+        let recorder = UpdateRecorder()
+        let coordinator = MaterializerCoordinator()
+
+        await coordinator.run(
+            configuration: makeConfiguration(
+                sourceRoot: sourceRoot,
+                destinationRoot: destinationRoot,
+                shouldCreateArchive: true
+            ),
+            pauseController: PauseController()
+        ) { update in
+            await recorder.record(update)
+        }
+
+        let snapshot = await recorder.lastSnapshot()
+        XCTAssertEqual(snapshot?.phase, .completed)
+
+        let zipURL = sourceRoot.appendingPathComponent("\(sourceRoot.lastPathComponent).zip", isDirectory: false)
+        XCTAssertTrue(fileManager.fileExists(atPath: zipURL.path))
+        let zipSize = try XCTUnwrap((try fileManager.attributesOfItem(atPath: zipURL.path)[.size] as? NSNumber)?.int64Value)
+        XCTAssertGreaterThan(zipSize, 0)
+    }
+
+    func testCoordinatorFailsFastWhenPreflightBlocksRun() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("SourceProject", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("Destination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try createFixture(at: sourceRoot)
+        let recorder = UpdateRecorder()
+        let coordinator = MaterializerCoordinator()
+        let preflightReport = PreflightReport(
+            generatedAt: Date(),
+            checks: [
+                PreflightCheck(
+                    id: "permissions",
+                    title: "Review Privacy & Security permissions",
+                    detail: "macOS access is still pending.",
+                    state: .actionRequired,
+                    isManual: true
+                )
+            ]
+        )
+
+        await coordinator.run(
+            configuration: makeConfiguration(
+                sourceRoot: sourceRoot,
+                destinationRoot: destinationRoot,
+                preflightReport: preflightReport
+            ),
+            pauseController: PauseController()
+        ) { update in
+            await recorder.record(update)
+        }
+
+        let snapshot = await recorder.lastSnapshot()
+        XCTAssertEqual(snapshot?.phase, .failed)
+        XCTAssertTrue(snapshot?.lastError?.contains("Preflight blocked") == true)
+        XCTAssertFalse(fileManager.fileExists(atPath: destinationRoot.appendingPathComponent(sourceRoot.lastPathComponent, isDirectory: true).path))
     }
 
     func testCoordinatorFailsIfVisibleTargetChangesAfterPromotion() async throws {
@@ -70,11 +144,88 @@ final class MaterializerCoordinatorTests: XCTestCase {
         XCTAssertFalse(fileManager.fileExists(atPath: zipURL.path))
     }
 
-    private func makeConfiguration(sourceRoot: URL, destinationRoot: URL) -> JobConfiguration {
+    func testCoordinatorReusesPersistedDiscoveryInventoryOnRetry() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("SourceProject", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("Destination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try createFixture(at: sourceRoot)
+        var configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
+        configuration.jobID = JobConfiguration.resumeJobID(
+            sourceURL: sourceRoot,
+            destinationURL: destinationRoot,
+            targetFolderName: nil,
+            transferPolicy: configuration.transferPolicy
+        )
+
+        let persistedItems = try await ScanEngine().scan(sourceRoot: sourceRoot, transferPolicy: configuration.transferPolicy)
+        let store = try JobStore(databaseURL: configuration.databaseURL)
+        try await store.saveJobSnapshot(
+            JobSnapshot(
+                jobID: configuration.jobID,
+                phase: .failed,
+                phaseDetail: "Previous session ended during scan",
+                sourcePath: sourceRoot.path,
+                destinationPath: destinationRoot.path,
+                currentPath: nil,
+                totalDiscovered: persistedItems.count,
+                totalDownloaded: 0,
+                totalCopied: 0,
+                totalFailed: 0,
+                plannedChunks: 0,
+                processedChunks: 0,
+                estimatedRemainingCount: persistedItems.count,
+                throughputItemsPerSecond: 0,
+                throughputBytesPerSecond: 0,
+                totalExpectedBytes: persistedItems.expectedBytes,
+                copiedBytes: 0,
+                activeWorkerCount: 0,
+                estimatedRemainingSeconds: nil,
+                preflightReport: nil,
+                hydrationMetrics: HydrationMetrics(),
+                startedAt: Date(timeIntervalSince1970: 100),
+                finishedAt: Date(timeIntervalSince1970: 110),
+                lastError: "Interrupted during scan"
+            )
+        )
+        try await store.saveItems(jobID: configuration.jobID, items: persistedItems)
+        try await store.close()
+
+        let recorder = UpdateRecorder()
+        let coordinator = MaterializerCoordinator()
+
+        await coordinator.run(
+            configuration: configuration,
+            pauseController: PauseController()
+        ) { update in
+            await recorder.record(update)
+        }
+
+        let snapshot = await recorder.lastSnapshot()
+        let logMessages = await recorder.logMessages()
+        XCTAssertEqual(snapshot?.phase, .completed)
+        XCTAssertTrue(logMessages.contains(where: { $0.contains("Resuming from persisted discovery inventory") }))
+
+        let visibleTarget = destinationRoot.appendingPathComponent(sourceRoot.lastPathComponent, isDirectory: true)
+        let verification = try await VerificationEngine().verify(expectedItems: persistedItems, at: visibleTarget)
+        XCTAssertEqual(verification.verifiedCount, persistedItems.count)
+    }
+
+    private func makeConfiguration(
+        sourceRoot: URL,
+        destinationRoot: URL,
+        shouldCreateArchive: Bool = false,
+        preflightReport: PreflightReport? = nil
+    ) -> JobConfiguration {
         JobConfiguration(
             jobID: UUID(),
             sourceURL: sourceRoot,
             destinationURL: destinationRoot,
+            preflightReport: preflightReport,
             transferPolicy: .exactCopy,
             priorityPolicy: .naturalOrder,
             workerCount: 2,
@@ -82,6 +233,7 @@ final class MaterializerCoordinatorTests: XCTestCase {
             retryCount: 1,
             backoffSchedule: [.seconds(0), .seconds(1)],
             maxHydrationWait: .seconds(30),
+            shouldCreateArchive: shouldCreateArchive,
             allowTargetQuarantine: false,
             enableFinderFallback: false
         )

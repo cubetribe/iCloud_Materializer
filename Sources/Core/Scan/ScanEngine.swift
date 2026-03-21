@@ -12,6 +12,73 @@ actor ScanEngine {
         .isHiddenKey
     ]
 
+    func scanTopLevel(
+        sourceRoot: URL,
+        transferPolicy: TransferPolicy,
+        onItem: (@Sendable (ScannedItem) async -> Void)? = nil
+    ) async throws -> [ScannedItem] {
+        let children = try fileManager.contentsOfDirectory(
+            at: sourceRoot,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: [.skipsPackageDescendants]
+        )
+
+        var items: [ScannedItem] = []
+        for url in children.sorted(by: { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }) {
+            let relativePath = normalizedRelativePath(for: url, sourceRoot: sourceRoot)
+            guard !relativePath.isEmpty else { continue }
+            let item = try buildItem(for: url, relativePath: relativePath, transferPolicy: transferPolicy)
+            guard let item else { continue }
+            items.append(item)
+            if let onItem {
+                await onItem(item)
+            }
+        }
+        return items
+    }
+
+    func scanSubtree(
+        sourceRoot: URL,
+        anchorRelativePath: String,
+        transferPolicy: TransferPolicy,
+        onItem: (@Sendable (ScannedItem) async -> Void)? = nil
+    ) async throws -> [ScannedItem] {
+        let subtreeURL = sourceRoot.appendingPathComponent(anchorRelativePath, isDirectory: true)
+        guard let enumerator = fileManager.enumerator(
+            at: subtreeURL,
+            includingPropertiesForKeys: Array(resourceKeys),
+            options: [],
+            errorHandler: { _, _ in true }
+        ) else {
+            throw PipelineError.copyFailed(subtreeURL.path)
+        }
+
+        var items: [ScannedItem] = []
+        while let url = enumerator.nextObject() as? URL {
+            let relativePath = normalizedRelativePath(for: url, sourceRoot: sourceRoot)
+            guard !relativePath.isEmpty, relativePath != anchorRelativePath else { continue }
+            let values = try url.resourceValues(forKeys: resourceKeys)
+            let isDirectory = values.isDirectory ?? false
+            let isSymlink = values.isSymbolicLink ?? false
+            let kind: ItemKind = isSymlink ? .symlink : (isDirectory ? .directory : .file)
+            switch transferPolicy.scanDecision(relativePath: relativePath, kind: kind) {
+            case .include:
+                break
+            case .excludeItem:
+                continue
+            case .excludeDescendants:
+                enumerator.skipDescendants()
+                continue
+            }
+            let item = makeItem(url: url, relativePath: relativePath, values: values, kind: kind)
+            items.append(item)
+            if let onItem {
+                await onItem(item)
+            }
+        }
+        return items.sorted { $0.relativePath < $1.relativePath }
+    }
+
     func scan(
         sourceRoot: URL,
         transferPolicy: TransferPolicy,
@@ -43,29 +110,7 @@ actor ScanEngine {
                 enumerator.skipDescendants()
                 continue
             }
-            let isUbiquitous = values.isUbiquitousItem ?? false
-            let downloadStatus = values.ubiquitousItemDownloadingStatus
-            let fileSize = Int64(values.fileSize ?? 0)
-            let isLocalReady = Self.isLocallyAvailable(isUbiquitous: isUbiquitous, downloadStatus: downloadStatus)
-            let symlinkDestination: String?
-            if isSymlink {
-                symlinkDestination = try? fileManager.destinationOfSymbolicLink(atPath: url.path)
-            } else {
-                symlinkDestination = nil
-            }
-            let item = ScannedItem(
-                id: UUID(),
-                relativePath: relativePath,
-                kind: kind,
-                expectedSize: fileSize,
-                isHidden: values.isHidden ?? url.lastPathComponent.hasPrefix("."),
-                isUbiquitous: isUbiquitous,
-                isLocalReady: isLocalReady,
-                downloadStatusRaw: downloadStatus?.rawValue,
-                symlinkDestination: symlinkDestination,
-                state: isLocalReady ? .localReady : .pending,
-                lastError: nil
-            )
+            let item = makeItem(url: url, relativePath: relativePath, values: values, kind: kind)
             items.append(item)
             if let onItem {
                 await onItem(item)
@@ -100,6 +145,8 @@ actor ScanEngine {
             isLocalReady: localReady,
             downloadStatusRaw: status?.rawValue,
             symlinkDestination: isSymlink ? (try? FileManager.default.destinationOfSymbolicLink(atPath: sourceURL.path)) : nil,
+            hydrationState: localReady ? .ready : .notRequested,
+            hydrationError: nil,
             state: localReady ? .localReady : .pending,
             lastError: nil
         )
@@ -118,5 +165,54 @@ actor ScanEngine {
         let startIndex = itemPath.index(itemPath.startIndex, offsetBy: sourcePath.count)
         let raw = String(itemPath[startIndex...])
         return raw.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    private func buildItem(
+        for url: URL,
+        relativePath: String,
+        transferPolicy: TransferPolicy
+    ) throws -> ScannedItem? {
+        let values = try url.resourceValues(forKeys: resourceKeys)
+        let isDirectory = values.isDirectory ?? false
+        let isSymlink = values.isSymbolicLink ?? false
+        let kind: ItemKind = isSymlink ? .symlink : (isDirectory ? .directory : .file)
+        switch transferPolicy.scanDecision(relativePath: relativePath, kind: kind) {
+        case .include:
+            return makeItem(url: url, relativePath: relativePath, values: values, kind: kind)
+        case .excludeItem, .excludeDescendants:
+            return nil
+        }
+    }
+
+    private func makeItem(
+        url: URL,
+        relativePath: String,
+        values: URLResourceValues,
+        kind: ItemKind
+    ) -> ScannedItem {
+        let isUbiquitous = values.isUbiquitousItem ?? false
+        let downloadStatus = values.ubiquitousItemDownloadingStatus
+        let isLocalReady = Self.isLocallyAvailable(isUbiquitous: isUbiquitous, downloadStatus: downloadStatus)
+        let symlinkDestination: String?
+        if kind == .symlink {
+            symlinkDestination = try? fileManager.destinationOfSymbolicLink(atPath: url.path)
+        } else {
+            symlinkDestination = nil
+        }
+        return ScannedItem(
+            id: UUID(),
+            relativePath: relativePath,
+            kind: kind,
+            expectedSize: Int64(values.fileSize ?? 0),
+            isHidden: values.isHidden ?? url.lastPathComponent.hasPrefix("."),
+            isUbiquitous: isUbiquitous,
+            isLocalReady: isLocalReady,
+            downloadStatusRaw: downloadStatus?.rawValue,
+            symlinkDestination: symlinkDestination,
+            hydrationState: isLocalReady ? .ready : .notRequested,
+            hydrationError: nil,
+            state: isLocalReady ? .localReady : .pending,
+            lastError: nil
+        )
     }
 }

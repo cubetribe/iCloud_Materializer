@@ -22,6 +22,15 @@ struct MainView: View {
         .onChange(of: viewModel.runMode, initial: true) { _, _ in
             viewModel.rebuildBatchPreview()
         }
+        .onChange(of: viewModel.transferMode, initial: true) { _, _ in
+            viewModel.rebuildBatchPreview()
+        }
+        .onChange(of: viewModel.customExcludedDirectoryNamesText, initial: true) { _, _ in
+            viewModel.rebuildBatchPreview()
+        }
+        .onChange(of: viewModel.customExcludedFileExtensionsText, initial: true) { _, _ in
+            viewModel.rebuildBatchPreview()
+        }
         .alert("Destination Exists", isPresented: Binding(
             get: { viewModel.pendingConflict != nil },
             set: { if !$0 { viewModel.pendingConflict = nil } }
@@ -103,6 +112,8 @@ struct MainView: View {
                 metricsGrid
                 Divider()
                 chunkGrid
+                Divider()
+                hydrationMetricsGrid
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -250,15 +261,36 @@ struct MainView: View {
                 .frame(width: 360, alignment: .leading)
             }
 
+            GroupBox("Preflight") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(viewModel.preflightReport.canStart ? "All required checks are green." : "Resolve the required checks below before starting.")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(viewModel.preflightReport.canStart ? .green : .orange)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if viewModel.preflightReport.checks.isEmpty {
+                        Text("Choose a source and destination to build the rescue preflight checklist.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        ForEach(viewModel.preflightReport.checks) { check in
+                            preflightCheckRow(check)
+                        }
+                    }
+                }
+                .frame(width: 360, alignment: .leading)
+            }
+
             GroupBox("Controls") {
                 VStack(alignment: .leading, spacing: 12) {
-                    Stepper("Workers: \(viewModel.workerCount)", value: $viewModel.workerCount, in: 2...6)
+                    Stepper("Workers: \(viewModel.workerCount)", value: $viewModel.workerCount, in: 1...4)
                         .disabled(viewModel.isRunning)
-                    Stepper("Hydration Window: \(viewModel.hydrationWindow)", value: $viewModel.hydrationWindow, in: 4...24)
+                    Stepper("Hydration Window: \(viewModel.hydrationWindow)", value: $viewModel.hydrationWindow, in: 2...8)
                         .disabled(viewModel.isRunning)
                     Stepper("Retries: \(viewModel.retryCount)", value: $viewModel.retryCount, in: 1...6)
                         .disabled(viewModel.isRunning)
-                    Text("Hydration Window controls how many iCloud placeholders each worker may actively trigger and poll in parallel.")
+                    Text("The rescue now starts conservatively: fewer workers, smaller hydration windows, no blind project prewarm, and no automatic ZIP in the critical path.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -289,11 +321,10 @@ struct MainView: View {
             VStack(alignment: .leading, spacing: 14) {
                 batchMetricsGrid
 
-                if let sourceURL = viewModel.sourceURL {
-                    Text("Batch ZIP archives are written to \(sourceURL.appendingPathComponent("_Materializer_Archives", isDirectory: true).path)")
+                if viewModel.sourceURL != nil {
+                    Text("Automatic archive creation is disabled during rescue runs. Batch jobs finish once the local copy is verified.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
@@ -319,11 +350,11 @@ struct MainView: View {
     private var liveProgressSection: some View {
         GroupBox("Live Progress") {
             VStack(alignment: .leading, spacing: 12) {
-                if viewModel.snapshot.phase == .scanning || viewModel.snapshot.phase == .planningChunks {
+                if viewModel.snapshot.phase == .preflight || viewModel.snapshot.phase == .discovering || viewModel.snapshot.phase == .planningChunks {
                     VStack(alignment: .leading, spacing: 8) {
                         ProgressView()
                             .controlSize(.large)
-                        Text("Scanning is still building the full inventory. ETA becomes reliable after the scan is complete.")
+                        Text(progressIntroText)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -462,6 +493,65 @@ struct MainView: View {
                 metricCard("Current", value: batchCurrentText)
             }
         }
+    }
+
+    private var hydrationMetricsGrid: some View {
+        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 10) {
+            GridRow {
+                metricCard("Hydration Req", value: "\(viewModel.snapshot.hydrationMetrics.requestAttemptCount)")
+                metricCard("Req Failed", value: "\(viewModel.snapshot.hydrationMetrics.requestFailureCount)")
+                metricCard("Queued", value: "\(viewModel.snapshot.hydrationMetrics.queuedCount)")
+                metricCard("Ready", value: "\(viewModel.snapshot.hydrationMetrics.readyCount)")
+            }
+            GridRow {
+                metricCard("Stalled", value: "\(viewModel.snapshot.hydrationMetrics.stalledCount)")
+                metricCard("First Seen", value: timingText(viewModel.snapshot.hydrationMetrics.timeToFirstDiscoveredSeconds))
+                metricCard("First Ready", value: timingText(viewModel.snapshot.hydrationMetrics.timeToFirstReadySeconds))
+                metricCard("First Copy", value: timingText(viewModel.snapshot.hydrationMetrics.timeToFirstCopiedSeconds))
+            }
+        }
+    }
+
+    private var progressIntroText: String {
+        switch viewModel.snapshot.phase {
+        case .preflight:
+            return "The run is blocked in preflight until all required checks are confirmed."
+        case .discovering:
+            return "Discovery is still walking the source tree. Large `.git` object stores or cloud-only top-level folders can delay the first copy."
+        case .planningChunks:
+            return "Chunk planning now happens per discovered subtree. ETA becomes useful once copy work starts."
+        default:
+            return "Preparing work."
+        }
+    }
+
+    private func preflightCheckRow(_ check: PreflightCheck) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(check.title)
+                        .font(.subheadline.weight(.semibold))
+                    Text(check.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                preflightStateBadge(check.state)
+            }
+            if check.isManual {
+                Toggle(
+                    "Confirmed",
+                    isOn: Binding(
+                        get: { viewModel.confirmedPreflightCheckIDs.contains(check.id) },
+                        set: { viewModel.setPreflightConfirmation(id: check.id, isConfirmed: $0) }
+                    )
+                )
+                .toggleStyle(.checkbox)
+            }
+            Divider()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func folderRow(title: String, path: String?, action: @escaping () -> Void) -> some View {
@@ -613,6 +703,15 @@ struct MainView: View {
             .foregroundStyle(batchStateColor(for: state))
     }
 
+    private func preflightStateBadge(_ state: PreflightCheckState) -> some View {
+        Text(state.rawValue)
+            .font(.system(.caption, design: .rounded))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(preflightStateColor(for: state).opacity(0.14), in: Capsule())
+            .foregroundStyle(preflightStateColor(for: state))
+    }
+
     private var visibleActivities: [WorkerActivity] {
         if !viewModel.activities.isEmpty {
             return viewModel.activities
@@ -641,7 +740,7 @@ struct MainView: View {
     }
 
     private var etaText: String {
-        if viewModel.snapshot.phase == .scanning || viewModel.snapshot.phase == .planningChunks {
+        if viewModel.snapshot.phase == .preflight || viewModel.snapshot.phase == .discovering || viewModel.snapshot.phase == .scanning || viewModel.snapshot.phase == .planningChunks {
             return "ETA after scan"
         }
         guard let seconds = viewModel.snapshot.estimatedRemainingSeconds else {
@@ -651,13 +750,18 @@ struct MainView: View {
     }
 
     private var etaInlineText: String {
-        if viewModel.snapshot.phase == .scanning || viewModel.snapshot.phase == .planningChunks {
+        if viewModel.snapshot.phase == .preflight || viewModel.snapshot.phase == .discovering || viewModel.snapshot.phase == .scanning || viewModel.snapshot.phase == .planningChunks {
             return "After scan"
         }
         guard let seconds = viewModel.snapshot.estimatedRemainingSeconds else {
             return "Calculating"
         }
         return formattedDuration(seconds)
+    }
+
+    private func timingText(_ value: Double?) -> String {
+        guard let value else { return "-" }
+        return formattedDuration(value)
     }
 
     private var batchCurrentText: String {
@@ -710,6 +814,10 @@ struct MainView: View {
             return .orange
         case .failed, .cancelled:
             return .red
+        case .preflight:
+            return .orange
+        case .discovering, .hydrating:
+            return .teal
         case .zipping:
             return .blue
         default:
@@ -734,8 +842,14 @@ struct MainView: View {
 
     private func livePhaseColor(for phase: LiveActivityPhase) -> Color {
         switch phase {
+        case .preflight:
+            return .orange
+        case .discovering:
+            return .teal
         case .scanning:
             return .teal
+        case .hydrating:
+            return .blue
         case .planning:
             return .mint
         case .materializing:
@@ -753,12 +867,29 @@ struct MainView: View {
         }
     }
 
+    private func preflightStateColor(for state: PreflightCheckState) -> Color {
+        switch state {
+        case .passed:
+            return .green
+        case .warning:
+            return .orange
+        case .actionRequired:
+            return .red
+        }
+    }
+
     private func livePhase(from phase: JobPhase) -> LiveActivityPhase {
         switch phase {
+        case .preflight:
+            return .preflight
+        case .discovering:
+            return .discovering
         case .scanning:
             return .scanning
         case .planningChunks:
             return .planning
+        case .hydrating:
+            return .hydrating
         case .materializing:
             return .materializing
         case .copying:

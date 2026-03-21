@@ -40,14 +40,7 @@ final class BatchCoordinatorTests: XCTestCase {
 
         let configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
         let alphaTarget = destinationRoot.appendingPathComponent("Alpha-Lokal", isDirectory: true)
-        let alphaArchive = configuration.archiveRootURL.appendingPathComponent("Alpha.zip", isDirectory: false)
-        let alphaManifest = configuration.deletionManifestRootURL.appendingPathComponent("Alpha.json", isDirectory: false)
-
         try fileManager.createDirectory(at: alphaTarget, withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: alphaArchive.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: alphaManifest.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data("zip".utf8).write(to: alphaArchive)
-        try Data("manifest".utf8).write(to: alphaManifest)
 
         let restoredProject = BatchProjectPlan(
             id: UUID(),
@@ -56,10 +49,10 @@ final class BatchCoordinatorTests: XCTestCase {
             sourceFolderName: "Alpha",
             targetFolderName: "Alpha-Lokal",
             state: .completed,
-            detail: "Deletion manifest prepared.",
-            archiveURL: alphaArchive,
-            deletionManifestURL: alphaManifest,
-            readyForDeletion: true,
+            detail: "Local rescue finished.",
+            archiveURL: nil,
+            deletionManifestURL: nil,
+            readyForDeletion: false,
             startedAt: Date(timeIntervalSince1970: 10),
             finishedAt: Date(timeIntervalSince1970: 20)
         )
@@ -92,7 +85,7 @@ final class BatchCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(preview.snapshot.completedProjects, 1)
         XCTAssertEqual(preview.projects.first?.state, .completed)
-        XCTAssertTrue(preview.projects.first?.readyForDeletion == true)
+        XCTAssertFalse(preview.projects.first?.readyForDeletion == true)
         XCTAssertEqual(preview.projects.last?.state, .pending)
     }
 
@@ -110,15 +103,8 @@ final class BatchCoordinatorTests: XCTestCase {
 
         let configuration = makeConfiguration(sourceRoot: sourceRoot, destinationRoot: destinationRoot)
         let alphaTarget = destinationRoot.appendingPathComponent("Alpha-Lokal", isDirectory: true)
-        let alphaArchive = configuration.archiveRootURL.appendingPathComponent("Alpha.zip", isDirectory: false)
-        let alphaManifest = configuration.deletionManifestRootURL.appendingPathComponent("Alpha.json", isDirectory: false)
-
         try fileManager.createDirectory(at: alphaTarget, withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: alphaArchive.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: alphaManifest.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("DATABASE_URL=postgres://local".utf8).write(to: alphaTarget.appendingPathComponent(".env", isDirectory: false))
-        try Data("zip".utf8).write(to: alphaArchive)
-        try Data("manifest".utf8).write(to: alphaManifest)
 
         let restoredProject = BatchProjectPlan(
             id: UUID(),
@@ -127,10 +113,10 @@ final class BatchCoordinatorTests: XCTestCase {
             sourceFolderName: "Alpha",
             targetFolderName: "Alpha-Lokal",
             state: .completed,
-            detail: "Deletion manifest prepared.",
-            archiveURL: alphaArchive,
-            deletionManifestURL: alphaManifest,
-            readyForDeletion: true,
+            detail: "Local rescue finished.",
+            archiveURL: nil,
+            deletionManifestURL: nil,
+            readyForDeletion: false,
             startedAt: Date(timeIntervalSince1970: 10),
             finishedAt: Date(timeIntervalSince1970: 20)
         )
@@ -173,11 +159,12 @@ final class BatchCoordinatorTests: XCTestCase {
 
         let plans = await recorder.lastBatchProjects()
         XCTAssertEqual(plans.map { $0.state }, [.completed, .completed])
-        XCTAssertTrue(plans.allSatisfy { $0.readyForDeletion })
+        XCTAssertTrue(plans.allSatisfy { !$0.readyForDeletion })
         XCTAssertTrue(fileManager.fileExists(atPath: destinationRoot.appendingPathComponent("Alpha-Lokal", isDirectory: true).path))
         XCTAssertTrue(fileManager.fileExists(atPath: destinationRoot.appendingPathComponent("Beta-Lokal", isDirectory: true).path))
-        XCTAssertTrue(fileManager.fileExists(atPath: configuration.archiveRootURL.appendingPathComponent("Alpha.zip", isDirectory: false).path))
-        XCTAssertTrue(fileManager.fileExists(atPath: configuration.archiveRootURL.appendingPathComponent("Beta.zip", isDirectory: false).path))
+        XCTAssertFalse(fileManager.fileExists(atPath: configuration.archiveRootURL.appendingPathComponent("Alpha.zip", isDirectory: false).path))
+        XCTAssertFalse(fileManager.fileExists(atPath: configuration.archiveRootURL.appendingPathComponent("Beta.zip", isDirectory: false).path))
+        XCTAssertTrue(plans.first(where: { $0.sourceFolderName == "Beta" })?.detail?.contains("Automatic archive creation is disabled during rescue mode.") == true)
     }
 
     func testRunProcessesProjectsSequentially() async throws {
@@ -209,14 +196,52 @@ final class BatchCoordinatorTests: XCTestCase {
 
         let plans = await recorder.lastBatchProjects()
         XCTAssertEqual(plans.map { $0.state }, [.completed, .completed])
-        XCTAssertTrue(plans.allSatisfy { $0.readyForDeletion })
+        XCTAssertTrue(plans.allSatisfy { !$0.readyForDeletion })
         XCTAssertTrue(plans.allSatisfy { $0.deletionManifestURL != nil })
 
         let archiveRoot = sourceRoot.appendingPathComponent("_Materializer_Archives", isDirectory: true)
         XCTAssertTrue(fileManager.fileExists(atPath: destinationRoot.appendingPathComponent("Alpha-Lokal", isDirectory: true).path))
         XCTAssertTrue(fileManager.fileExists(atPath: destinationRoot.appendingPathComponent("Beta-Lokal", isDirectory: true).path))
-        XCTAssertTrue(fileManager.fileExists(atPath: archiveRoot.appendingPathComponent("Alpha.zip", isDirectory: false).path))
-        XCTAssertTrue(fileManager.fileExists(atPath: archiveRoot.appendingPathComponent("Beta.zip", isDirectory: false).path))
+        XCTAssertFalse(fileManager.fileExists(atPath: archiveRoot.appendingPathComponent("Alpha.zip", isDirectory: false).path))
+        XCTAssertFalse(fileManager.fileExists(atPath: archiveRoot.appendingPathComponent("Beta.zip", isDirectory: false).path))
+        XCTAssertFalse(plans.compactMap { $0.deletionManifestURL }.allSatisfy { fileManager.fileExists(atPath: $0.path) })
+        XCTAssertTrue(plans.allSatisfy { $0.detail?.contains("Automatic archive creation is disabled during rescue mode.") == true })
+    }
+
+    func testRunCanPrepareDeletionArtifactsWhenArchiveCreationIsEnabled() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("BatchSource", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("BatchDestination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try createFixture(named: "Alpha", in: sourceRoot)
+        try createFixture(named: "Beta", in: sourceRoot)
+
+        let recorder = BatchUpdateRecorder()
+        let coordinator = BatchCoordinator()
+        let configuration = makeConfiguration(
+            sourceRoot: sourceRoot,
+            destinationRoot: destinationRoot,
+            shouldCreateArchive: true
+        )
+
+        await coordinator.run(
+            configuration: configuration,
+            pauseController: PauseController()
+        ) { update in
+            await recorder.record(update)
+        }
+
+        let batchSnapshot = await recorder.lastBatchSnapshot()
+        XCTAssertEqual(batchSnapshot?.state, .completed)
+
+        let plans = await recorder.lastBatchProjects()
+        XCTAssertTrue(plans.allSatisfy { $0.readyForDeletion })
+        XCTAssertTrue(fileManager.fileExists(atPath: configuration.archiveRootURL.appendingPathComponent("Alpha.zip", isDirectory: false).path))
+        XCTAssertTrue(fileManager.fileExists(atPath: configuration.archiveRootURL.appendingPathComponent("Beta.zip", isDirectory: false).path))
         XCTAssertTrue(plans.compactMap { $0.deletionManifestURL }.allSatisfy { fileManager.fileExists(atPath: $0.path) })
     }
 
@@ -324,8 +349,8 @@ final class BatchCoordinatorTests: XCTestCase {
                     targetFolderName: "Beta-Lokal",
                     state: .pending,
                     detail: "Project root prefetch requested.",
-                    archiveURL: configuration.archiveRootURL.appendingPathComponent("Beta.zip", isDirectory: false),
-                    deletionManifestURL: configuration.deletionManifestRootURL.appendingPathComponent("Beta.json", isDirectory: false),
+                    archiveURL: nil,
+                    deletionManifestURL: nil,
                     readyForDeletion: false,
                     startedAt: nil,
                     finishedAt: nil
@@ -355,7 +380,11 @@ final class BatchCoordinatorTests: XCTestCase {
         XCTAssertFalse(plans.first(where: { $0.sourceFolderName == "Beta" })?.detail?.contains("Project root prefetch requested.") ?? false)
     }
 
-    private func makeConfiguration(sourceRoot: URL, destinationRoot: URL) -> BatchConfiguration {
+    private func makeConfiguration(
+        sourceRoot: URL,
+        destinationRoot: URL,
+        shouldCreateArchive: Bool = false
+    ) -> BatchConfiguration {
         BatchConfiguration(
             batchID: UUID(),
             sourceRootURL: sourceRoot,
@@ -368,6 +397,7 @@ final class BatchCoordinatorTests: XCTestCase {
             retryCount: 1,
             backoffSchedule: [.seconds(0), .seconds(1)],
             maxHydrationWait: .seconds(30),
+            shouldCreateArchive: shouldCreateArchive,
             enableFinderFallback: false
         )
     }

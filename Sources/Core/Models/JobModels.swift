@@ -1,9 +1,13 @@
+import CryptoKit
 import Foundation
 
 enum JobPhase: String, Codable, Sendable, CaseIterable {
     case idle
+    case preflight
+    case discovering
     case scanning
     case planningChunks
+    case hydrating
     case materializing
     case copying
     case verifyingChunks
@@ -99,6 +103,15 @@ enum ItemState: String, Codable, Sendable, CaseIterable {
     case skippedSymlink
 }
 
+enum HydrationState: String, Codable, Sendable, CaseIterable {
+    case notRequested
+    case queued
+    case downloading
+    case stalled
+    case requestFailed
+    case ready
+}
+
 enum ChunkState: String, Codable, Sendable, CaseIterable {
     case pending
     case active
@@ -143,14 +156,71 @@ enum LogLevel: String, Codable, Sendable, CaseIterable {
 }
 
 enum LiveActivityPhase: String, Codable, Sendable, CaseIterable {
+    case preflight
+    case discovering
     case scanning
     case planning
+    case hydrating
     case materializing
     case copying
     case verifying
     case promoting
     case zipping
     case idle
+}
+
+enum PreflightCheckState: String, Codable, Sendable, CaseIterable {
+    case passed
+    case warning
+    case actionRequired
+}
+
+struct PreflightCheck: Identifiable, Codable, Hashable, Sendable {
+    var id: String
+    var title: String
+    var detail: String
+    var state: PreflightCheckState
+    var isManual: Bool = false
+}
+
+struct PreflightReport: Codable, Hashable, Sendable {
+    var generatedAt: Date
+    var checks: [PreflightCheck]
+
+    static var empty: PreflightReport {
+        PreflightReport(generatedAt: .distantPast, checks: [])
+    }
+
+    var blockingChecks: [PreflightCheck] {
+        checks.filter { $0.state == .actionRequired }
+    }
+
+    var warningChecks: [PreflightCheck] {
+        checks.filter { $0.state == .warning }
+    }
+
+    var canStart: Bool {
+        blockingChecks.isEmpty
+    }
+
+    var blockingSummary: String? {
+        guard !blockingChecks.isEmpty else { return nil }
+        return blockingChecks.map(\.title).joined(separator: ", ")
+    }
+}
+
+struct HydrationMetrics: Codable, Hashable, Sendable {
+    var requestAttemptCount: Int = 0
+    var requestFailureCount: Int = 0
+    var queuedCount: Int = 0
+    var downloadingCount: Int = 0
+    var stalledCount: Int = 0
+    var readyCount: Int = 0
+    var timeToFirstDiscoveredSeconds: Double?
+    var timeToFirstHydrationRequestSeconds: Double?
+    var timeToFirstReadySeconds: Double?
+    var timeToFirstCopiedSeconds: Double?
+    var timeToFirstVerifiedChunkSeconds: Double?
 }
 
 struct ScannedItem: Identifiable, Codable, Hashable, Sendable {
@@ -163,6 +233,8 @@ struct ScannedItem: Identifiable, Codable, Hashable, Sendable {
     var isLocalReady: Bool
     var downloadStatusRaw: String?
     var symlinkDestination: String?
+    var hydrationState: HydrationState = .ready
+    var hydrationError: String? = nil
     var state: ItemState
     var lastError: String?
 }
@@ -224,6 +296,8 @@ struct JobSnapshot: Codable, Hashable, Sendable {
     var copiedBytes: Int64
     var activeWorkerCount: Int
     var estimatedRemainingSeconds: Double?
+    var preflightReport: PreflightReport?
+    var hydrationMetrics: HydrationMetrics
     var startedAt: Date?
     var finishedAt: Date?
     var lastError: String?
@@ -249,6 +323,8 @@ struct JobSnapshot: Codable, Hashable, Sendable {
             copiedBytes: 0,
             activeWorkerCount: 0,
             estimatedRemainingSeconds: nil,
+            preflightReport: nil,
+            hydrationMetrics: HydrationMetrics(),
             startedAt: nil,
             finishedAt: nil,
             lastError: nil
@@ -321,6 +397,7 @@ struct JobConfiguration: Sendable {
     var destinationURL: URL
     var targetFolderName: String? = nil
     var finalArchiveURL: URL? = nil
+    var preflightReport: PreflightReport? = nil
     var transferPolicy: TransferPolicy
     var priorityPolicy: TransferPriorityPolicy
     var workerCount: Int
@@ -328,11 +405,21 @@ struct JobConfiguration: Sendable {
     var retryCount: Int
     var backoffSchedule: [Duration]
     var maxHydrationWait: Duration
+    var shouldCreateArchive: Bool = false
     var hydrationPrefetchWindow: Int = 24
     var hydrationHotSlotDuration: Duration = .seconds(4)
     var hydrationCooldownSchedule: [Duration] = [.seconds(10), .seconds(45), .seconds(120)]
     var allowTargetQuarantine: Bool
     var enableFinderFallback: Bool
+
+    var resumeKey: String {
+        Self.makeResumeKey(
+            sourceURL: sourceURL,
+            destinationURL: destinationURL,
+            targetFolderName: targetFolderName,
+            transferPolicy: transferPolicy
+        )
+    }
 
     var visibleTargetURL: URL {
         destinationURL.appendingPathComponent(targetFolderName ?? sourceURL.lastPathComponent, isDirectory: true)
@@ -365,6 +452,52 @@ struct JobConfiguration: Sendable {
     var localPrefetchScanDepth: Int {
         max(hydrationWindow, 1) + effectiveHydrationPrefetchBuffer
     }
+
+    static func resumeJobID(
+        sourceURL: URL,
+        destinationURL: URL,
+        targetFolderName: String?,
+        transferPolicy: TransferPolicy
+    ) -> UUID {
+        deterministicUUID(
+            seed: makeResumeKey(
+                sourceURL: sourceURL,
+                destinationURL: destinationURL,
+                targetFolderName: targetFolderName,
+                transferPolicy: transferPolicy
+            )
+        )
+    }
+
+    private static func makeResumeKey(
+        sourceURL: URL,
+        destinationURL: URL,
+        targetFolderName: String?,
+        transferPolicy: TransferPolicy
+    ) -> String {
+        let sourcePath = sourceURL.standardizedFileURL.path.lowercased()
+        let destinationPath = destinationURL.standardizedFileURL.path.lowercased()
+        let target = (targetFolderName ?? sourceURL.lastPathComponent).lowercased()
+        return [
+            sourcePath,
+            destinationPath,
+            target,
+            transferPolicy.resumeFingerprint
+        ].joined(separator: "|")
+    }
+
+    private static func deterministicUUID(seed: String) -> UUID {
+        let digest = SHA256.hash(data: Data(seed.utf8))
+        var bytes = Array(digest.prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x50
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
+    }
 }
 
 struct BatchConfiguration: Sendable {
@@ -380,6 +513,8 @@ struct BatchConfiguration: Sendable {
     var retryCount: Int
     var backoffSchedule: [Duration]
     var maxHydrationWait: Duration
+    var shouldCreateArchive: Bool = false
+    var hydrationPrefetchWindow: Int = 0
     var enableFinderFallback: Bool
     var projectPrefetchWindow: Int = 4
 
@@ -485,7 +620,7 @@ struct BatchConfiguration: Sendable {
             sourceURL: plan.sourceURL,
             destinationURL: destinationRootURL,
             targetFolderName: plan.targetFolderName,
-            finalArchiveURL: archiveRootURL.appendingPathComponent("\(plan.sourceFolderName).zip", isDirectory: false),
+            finalArchiveURL: shouldCreateArchive ? archiveRootURL.appendingPathComponent("\(plan.sourceFolderName).zip", isDirectory: false) : nil,
             transferPolicy: transferPolicy,
             priorityPolicy: priorityPolicy,
             workerCount: workerCount,
@@ -493,6 +628,8 @@ struct BatchConfiguration: Sendable {
             retryCount: retryCount,
             backoffSchedule: backoffSchedule,
             maxHydrationWait: maxHydrationWait,
+            shouldCreateArchive: shouldCreateArchive,
+            hydrationPrefetchWindow: hydrationPrefetchWindow,
             allowTargetQuarantine: false,
             enableFinderFallback: enableFinderFallback
         )

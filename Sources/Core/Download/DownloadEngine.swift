@@ -3,6 +3,10 @@ import Foundation
 struct DownloadEngine: Sendable {
     enum Event: Sendable {
         case evaluating(ScannedItem)
+        case requested(ScannedItem)
+        case requestFailed(ScannedItem, message: String)
+        case downloading(ScannedItem)
+        case stalled(ScannedItem)
         case deferred(ScannedItem, retryAfter: Duration)
         case ready(ScannedItem, downloaded: Bool)
     }
@@ -26,6 +30,7 @@ struct DownloadEngine: Sendable {
         var hotQueue: [PendingHydration] = []
         var coolingQueue: [CoolingHydration] = []
         let hydrationSession = hydrationSession ?? HydrationSession(maxRequestedHydrations: configuration.maxRequestedHydrations)
+        var adaptiveWindow = min(max(configuration.hydrationWindow, 1), 2)
 
         for item in sortedItems {
             try await pauseController.checkpoint()
@@ -35,13 +40,17 @@ struct DownloadEngine: Sendable {
                 if readyItem.state == .pending {
                     readyItem.state = .localReady
                 }
+                readyItem.hydrationState = .ready
+                readyItem.hydrationError = nil
                 resolvedItems[readyItem.relativePath] = readyItem
                 await onEvent(.ready(readyItem, downloaded: false))
                 continue
             }
 
             let sourceURL = sourceRoot.appendingPathComponent(item.relativePath, isDirectory: item.kind == .directory)
-            hotQueue.append(PendingHydration(item: item, sourceURL: sourceURL))
+            var pendingItem = item
+            pendingItem.hydrationState = .notRequested
+            hotQueue.append(PendingHydration(item: pendingItem, sourceURL: sourceURL))
         }
         var inflight: [String: ActiveHydration] = [:]
         do {
@@ -56,14 +65,24 @@ struct DownloadEngine: Sendable {
                     scanDepth: configuration.localPrefetchScanDepth
                 )
 
-                while inflight.count < configuration.hydrationWindow, !hotQueue.isEmpty {
-                    let pending = hotQueue.removeFirst()
+                while inflight.count < adaptiveWindow, !hotQueue.isEmpty {
+                    var pending = hotQueue.removeFirst()
                     let target = HydrationTarget(
                         relativePath: pending.item.relativePath,
                         sourceURL: pending.sourceURL
                     )
                     await onEvent(.evaluating(pending.item))
-                    await hydrationSession.activate(target: target)
+                    switch await hydrationSession.activate(target: target) {
+                    case .accepted, .alreadyRequested:
+                        pending.item.hydrationState = .queued
+                        pending.item.hydrationError = nil
+                        await onEvent(.requested(pending.item))
+                    case .failed(let message):
+                        pending.item.hydrationState = .requestFailed
+                        pending.item.hydrationError = message
+                        await onEvent(.requestFailed(pending.item, message: message))
+                        throw PipelineError.materializationFailed("\(pending.item.relativePath): \(message)")
+                    }
                     inflight[pending.item.relativePath] = ActiveHydration(
                         item: pending.item,
                         sourceURL: pending.sourceURL,
@@ -71,7 +90,8 @@ struct DownloadEngine: Sendable {
                         slotStartedAt: now,
                         nextPollAt: now,
                         pollAttempt: 0,
-                        restartCount: pending.restartCount
+                        restartCount: pending.restartCount,
+                        didReportDownloading: false
                     )
                 }
 
@@ -85,6 +105,7 @@ struct DownloadEngine: Sendable {
                 var madeProgress = false
                 var nextPollTime: Date?
                 let queuedWorkExists = !hotQueue.isEmpty || !coolingQueue.isEmpty
+                var deferredDuringLoop = false
 
                 for path in inflight.keys.sorted() {
                     guard var active = inflight[path] else { continue }
@@ -95,10 +116,12 @@ struct DownloadEngine: Sendable {
                     }
 
                     do {
-                        let refreshed = try ScanEngine.refreshedItem(at: active.sourceURL, relativePath: active.item.relativePath)
+                        var refreshed = try ScanEngine.refreshedItem(at: active.sourceURL, relativePath: active.item.relativePath)
                         if refreshed.isLocalReady {
                             inflight.removeValue(forKey: path)
                             await hydrationSession.finishActive(path: path, isReady: true)
+                            refreshed.hydrationState = .ready
+                            refreshed.hydrationError = nil
                             resolvedItems[path] = refreshed
                             downloadedCount += 1
                             await onEvent(.ready(refreshed, downloaded: true))
@@ -112,7 +135,21 @@ struct DownloadEngine: Sendable {
                     }
 
                     if now.timeIntervalSince(active.firstRequestedAt) >= configuration.maxHydrationWait.timeInterval {
+                        active.item.hydrationState = .stalled
+                        await onEvent(.stalled(active.item))
                         throw PipelineError.materializationFailed(active.item.relativePath)
+                    }
+
+                    if !active.didReportDownloading {
+                        active.didReportDownloading = true
+                        active.item.hydrationState = .downloading
+                        await onEvent(.downloading(active.item))
+                    }
+
+                    if active.restartCount >= configuration.retryCount {
+                        active.item.hydrationState = .stalled
+                        await onEvent(.stalled(active.item))
+                        throw PipelineError.materializationFailed("\(active.item.relativePath): exceeded hydration retry budget")
                     }
 
                     if shouldCool(
@@ -128,14 +165,18 @@ struct DownloadEngine: Sendable {
                         )
                         inflight.removeValue(forKey: path)
                         await hydrationSession.finishActive(path: path, isReady: false)
+                        var cooledItem = active.item
+                        cooledItem.hydrationState = .stalled
                         coolingQueue.append(CoolingHydration(
-                            item: active.item,
+                            item: cooledItem,
                             sourceURL: active.sourceURL,
                             firstRequestedAt: active.firstRequestedAt,
                             restartCount: active.restartCount + 1,
                             retryAt: now.addingTimeInterval(retryAfter.timeInterval)
                         ))
-                        await onEvent(.deferred(active.item, retryAfter: retryAfter))
+                        await onEvent(.stalled(cooledItem))
+                        await onEvent(.deferred(cooledItem, retryAfter: retryAfter))
+                        deferredDuringLoop = true
                         madeProgress = true
                         continue
                     }
@@ -148,6 +189,12 @@ struct DownloadEngine: Sendable {
                     active.nextPollAt = now.addingTimeInterval(nextDelay.timeInterval)
                     inflight[path] = active
                     nextPollTime = min(nextPollTime ?? active.nextPollAt, active.nextPollAt)
+                }
+
+                if madeProgress, adaptiveWindow < configuration.hydrationWindow, inflight.count >= adaptiveWindow {
+                    adaptiveWindow += 1
+                } else if deferredDuringLoop, adaptiveWindow > 1 {
+                    adaptiveWindow -= 1
                 }
 
                 guard !madeProgress else { continue }
@@ -254,6 +301,7 @@ struct ActiveHydration: Sendable {
     var nextPollAt: Date
     var pollAttempt: Int
     var restartCount: Int
+    var didReportDownloading: Bool
 }
 
 struct HydrationTarget: Sendable {
@@ -263,6 +311,12 @@ struct HydrationTarget: Sendable {
 
 actor HydrationSession {
     typealias RequestStarter = @Sendable (URL) throws -> Void
+
+    enum ActivationResult: Sendable {
+        case accepted
+        case alreadyRequested
+        case failed(String)
+    }
 
     private struct PathState {
         var requestIssued = false
@@ -288,15 +342,22 @@ actor HydrationSession {
 
         for target in targets {
             guard requestedPathCount < maxRequestedHydrations else { break }
-            issueRequestIfNeeded(for: target, allowBeyondLimit: false)
+            _ = issueRequestIfNeeded(for: target, allowBeyondLimit: false)
         }
     }
 
-    func activate(target: HydrationTarget) {
-        issueRequestIfNeeded(for: target, allowBeyondLimit: true)
-        var state = states[target.relativePath] ?? PathState()
-        state.activeCount += 1
-        states[target.relativePath] = state
+    func activate(target: HydrationTarget) -> ActivationResult {
+        let result = issueRequestIfNeeded(for: target, allowBeyondLimit: true)
+        if case .accepted = result {
+            var state = states[target.relativePath] ?? PathState()
+            state.activeCount += 1
+            states[target.relativePath] = state
+        } else if case .alreadyRequested = result {
+            var state = states[target.relativePath] ?? PathState()
+            state.activeCount += 1
+            states[target.relativePath] = state
+        }
+        return result
     }
 
     func finishActive(path: String, isReady: Bool = false) {
@@ -328,15 +389,15 @@ actor HydrationSession {
         states[path]?.isReady == true
     }
 
-    private func issueRequestIfNeeded(for target: HydrationTarget, allowBeyondLimit: Bool) {
+    private func issueRequestIfNeeded(for target: HydrationTarget, allowBeyondLimit: Bool) -> ActivationResult {
         var state = states[target.relativePath] ?? PathState()
         guard !state.isReady, !state.requestIssued else {
             states[target.relativePath] = state
-            return
+            return .alreadyRequested
         }
         guard allowBeyondLimit || requestedPathCount < maxRequestedHydrations else {
             states[target.relativePath] = state
-            return
+            return .alreadyRequested
         }
 
         do {
@@ -345,10 +406,11 @@ actor HydrationSession {
             requestedPathCount += 1
         } catch {
             states[target.relativePath] = state
-            return
+            return .failed(error.localizedDescription)
         }
 
         states[target.relativePath] = state
+        return .accepted
     }
 
     private func markReady(_ state: inout PathState) {

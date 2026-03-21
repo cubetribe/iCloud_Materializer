@@ -104,10 +104,14 @@ final class DownloadEngineTests: XCTestCase {
         XCTAssertEqual(recorder.recordedPaths(), ["one", "two"])
         XCTAssertFalse(thirdIssuedBeforeActivation)
 
-        await session.activate(target: targets[2])
+        let activationResult = await session.activate(target: targets[2])
 
         let requestedAfterActivation = await session.requestedHydrationCount()
         let thirdIssuedAfterActivation = await session.requestWasIssued(for: "three")
+        if case .accepted = activationResult {
+        } else {
+            XCTFail("Expected activation to accept a new hydration request")
+        }
         XCTAssertEqual(requestedAfterActivation, 3)
         XCTAssertEqual(recorder.recordedPaths(), ["one", "two", "three"])
         XCTAssertTrue(thirdIssuedAfterActivation)
@@ -148,15 +152,105 @@ final class DownloadEngineTests: XCTestCase {
         )
 
         await session.prefetch(targets: [target])
-        await session.activate(target: target)
+        let activationResult = await session.activate(target: target)
         await session.finishActive(path: "one", isReady: true)
         await session.prefetch(targets: [target])
 
         let requestedAfterReady = await session.requestedHydrationCount()
         let readyState = await session.readyState(for: "one")
+        if case .alreadyRequested = activationResult {
+        } else {
+            XCTFail("Expected activation to detect an already-requested hydration")
+        }
         XCTAssertEqual(recorder.recordedPaths(), ["one"])
         XCTAssertEqual(requestedAfterReady, 0)
         XCTAssertTrue(readyState)
+    }
+
+    func testHydrationSessionReportsFailedActivationWithoutIncrementingRequestedCount() async {
+        let session = HydrationSession(maxRequestedHydrations: 1) { _ in
+            throw DownloadTestError.rejected
+        }
+        let target = HydrationTarget(
+            relativePath: "one",
+            sourceURL: URL(fileURLWithPath: "/tmp/one")
+        )
+
+        let result = await session.activate(target: target)
+        switch result {
+        case .failed(let message):
+            XCTAssertEqual(message, DownloadTestError.rejected.localizedDescription)
+        case .accepted, .alreadyRequested:
+            XCTFail("Expected activation to fail")
+        }
+
+        let requestedCount = await session.requestedHydrationCount()
+        let requestWasIssued = await session.requestWasIssued(for: "one")
+        XCTAssertEqual(requestedCount, 0)
+        XCTAssertFalse(requestWasIssued)
+    }
+
+    func testMaterializeEmitsRequestFailureEventWhenHydrationRequestIsRejected() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("Source", isDirectory: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try Data("hello".utf8).write(to: sourceRoot.appendingPathComponent("one.txt", isDirectory: false))
+
+        let item = ScannedItem(
+            id: UUID(),
+            relativePath: "one.txt",
+            kind: .file,
+            expectedSize: 5,
+            isHidden: false,
+            isUbiquitous: true,
+            isLocalReady: false,
+            downloadStatusRaw: nil,
+            symlinkDestination: nil,
+            hydrationState: .notRequested,
+            hydrationError: nil,
+            state: .pending,
+            lastError: nil
+        )
+        let configuration = JobConfiguration(
+            jobID: UUID(),
+            sourceURL: sourceRoot,
+            destinationURL: workspace.appendingPathComponent("Destination", isDirectory: true),
+            transferPolicy: .exactCopy,
+            priorityPolicy: .naturalOrder,
+            workerCount: 1,
+            hydrationWindow: 1,
+            retryCount: 1,
+            backoffSchedule: [.seconds(0)],
+            maxHydrationWait: .seconds(1),
+            allowTargetQuarantine: false,
+            enableFinderFallback: false
+        )
+        let session = HydrationSession(maxRequestedHydrations: 1) { _ in
+            throw DownloadTestError.rejected
+        }
+        let recorder = DownloadEventRecorder()
+
+        do {
+            _ = try await DownloadEngine().materialize(
+                items: [item],
+                sourceRoot: sourceRoot,
+                configuration: configuration,
+                pauseController: PauseController(),
+                hydrationSession: session,
+                onEvent: { event in
+                    await recorder.record(event)
+                }
+            )
+            XCTFail("Expected materialization to fail")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Item could not be materialized locally: one.txt: request rejected")
+        }
+
+        let events = await recorder.events()
+        XCTAssertEqual(events, ["evaluating:one.txt", "requestFailed:one.txt"])
     }
 
     func testShouldCoolOnlyWhenSlotExpiredAndOtherWorkCanAdvance() {
@@ -182,7 +276,8 @@ final class DownloadEngineTests: XCTestCase {
             slotStartedAt: now.addingTimeInterval(-7),
             nextPollAt: now,
             pollAttempt: 0,
-            restartCount: 0
+            restartCount: 0,
+            didReportDownloading: false
         )
 
         XCTAssertTrue(engine.shouldCool(
@@ -214,7 +309,8 @@ final class DownloadEngineTests: XCTestCase {
             slotStartedAt: now.addingTimeInterval(-2),
             nextPollAt: now,
             pollAttempt: 0,
-            restartCount: 0
+            restartCount: 0,
+            didReportDownloading: false
         )
         XCTAssertFalse(engine.shouldCool(
             active: freshActive,
@@ -223,6 +319,44 @@ final class DownloadEngineTests: XCTestCase {
             otherInflightCount: 1,
             hotSlotDuration: .seconds(6)
         ))
+    }
+}
+
+private enum DownloadTestError: LocalizedError {
+    case rejected
+
+    var errorDescription: String? {
+        switch self {
+        case .rejected:
+            return "request rejected"
+        }
+    }
+}
+
+private actor DownloadEventRecorder {
+    private var recorded: [String] = []
+
+    func record(_ event: DownloadEngine.Event) {
+        switch event {
+        case .evaluating(let item):
+            recorded.append("evaluating:\(item.relativePath)")
+        case .requested(let item):
+            recorded.append("requested:\(item.relativePath)")
+        case .requestFailed(let item, _):
+            recorded.append("requestFailed:\(item.relativePath)")
+        case .downloading(let item):
+            recorded.append("downloading:\(item.relativePath)")
+        case .stalled(let item):
+            recorded.append("stalled:\(item.relativePath)")
+        case .deferred(let item, _):
+            recorded.append("deferred:\(item.relativePath)")
+        case .ready(let item, let downloaded):
+            recorded.append("ready:\(item.relativePath):\(downloaded)")
+        }
+    }
+
+    func events() -> [String] {
+        recorded
     }
 }
 
