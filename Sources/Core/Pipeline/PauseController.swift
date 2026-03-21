@@ -22,6 +22,7 @@ actor PauseController {
     }
 
     func checkpoint() async throws {
+        try Task.checkCancellation()
         if isCancelled {
             throw CancellationError()
         }
@@ -30,6 +31,7 @@ actor PauseController {
                 waitingContinuations.append(continuation)
             }
         }
+        try Task.checkCancellation()
         if isCancelled {
             throw CancellationError()
         }

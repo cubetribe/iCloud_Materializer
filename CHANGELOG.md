@@ -39,10 +39,12 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Hydration now uses a bounded prefetch buffer ahead of active slots so iCloud downloads can be requested earlier without letting the queue grow unbounded.
 - Batch prewarm now touches each upcoming project root plus a small set of direct children so directory-local iCloud content starts hydrating sooner, and resumed runs can prewarm those projects again.
 - README expanded into an operational guide covering run modes, safety model, runtime artifacts, resume behavior, and repo relocation.
+- README now explains the root cause of low apparent utilization in large iCloud rescues and positions the app explicitly as a rescue/orchestration layer around Apple's File Provider behavior.
 - Rescue runs now begin with `preflight -> shallow discovery -> hydration -> copy/verify/promote` instead of waiting for a whole-tree scan and chunk plan before the first useful copy work.
 - Automatic ZIP creation is now disabled in the default rescue path so success means a verified local copy first; archive creation is deferred to a later manual step.
 - Coding Project mode now allows an explicit custom `.git` exclusion so Git object stores can be skipped when scan time dominates rescue progress.
 - Rescue-mode batch previews no longer keep advertising deletion readiness when archive creation is disabled.
+- Aggressive single-project runs now request iCloud warmup across multiple top-level directories in parallel before subtree processing starts, so the app can pressure more than one cold folder tree at a time.
 
 ### Fixed
 - Restored and re-validated the batch queue implementation after workspace recovery.
@@ -53,3 +55,5 @@ This repository does not use automated releases yet. Until the first tagged rele
 - Replaced Finder-scripted recovery copies with a cancellable `ditto`-based recovery path so aborting a batch no longer leaves delayed system-level copy jobs running in the background.
 - Removed silent iCloud download-request failures so rejected hydration requests surface immediately in logs, state, and failure handling.
 - Fixed a single-project retry failure where persisted discovery inventories could resurrect internal rescue artifacts like `_Materializer_Archives` and stop the run with a terminal `Fail` instead of rescanning cleanly.
+- Fixed pause and cancel handling during long-running discovery, verification, and rescue prewarm phases so the UI controls now interrupt active runs instead of waiting for a later copy-stage checkpoint.
+- Added a bounded top-level warmup scheduler for aggressive rescue runs so single-project jobs are no longer limited to requesting iCloud hydration for only one root directory at a time.

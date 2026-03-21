@@ -599,6 +599,11 @@ struct JobConfiguration: Sendable {
         max(hydrationWindow, 1) + effectiveHydrationPrefetchBuffer
     }
 
+    var topLevelWarmupConcurrency: Int {
+        guard rescueProfile == .aggressive else { return 0 }
+        return min(max(workerCount, 2), 8)
+    }
+
     static func resumeJobID(
         sourceURL: URL,
         destinationURL: URL,

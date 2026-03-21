@@ -20,6 +20,7 @@ final class BatchCoordinator: @unchecked Sendable {
             )
             var requested = 0
             for candidate in candidates where requested < childLimit + 1 {
+                guard !Task.isCancelled else { return }
                 guard let values = try? candidate.resourceValues(forKeys: resourceKeys),
                       values.isUbiquitousItem == true else {
                     continue
@@ -150,10 +151,11 @@ final class BatchCoordinator: @unchecked Sendable {
                 projects[index].startedAt = Date()
                 projects[index].finishedAt = nil
                 projects[index].detail = retryDetail(for: projects[index])
-                await prefetchUpcomingProjects(
+                try await prefetchUpcomingProjects(
                     from: index,
                     projects: &projects,
                     configuration: configuration,
+                    pauseController: pauseController,
                     prefetchedProjectSourcePaths: &prefetchedProjectSourcePaths
                 )
 
@@ -459,16 +461,19 @@ final class BatchCoordinator: @unchecked Sendable {
         from currentIndex: Int,
         projects: inout [BatchProjectPlan],
         configuration: BatchConfiguration,
+        pauseController: PauseController,
         prefetchedProjectSourcePaths: inout Set<String>
-    ) async {
+    ) async throws {
         guard configuration.projectPrefetchWindow > 0 else { return }
 
         var remaining = configuration.projectPrefetchWindow
         for nextIndex in projects.indices where nextIndex > currentIndex {
+            try await pauseController.checkpoint()
             guard remaining > 0 else { break }
             guard shouldPrefetch(projects[nextIndex], prefetchedProjectSourcePaths: prefetchedProjectSourcePaths) else { continue }
             let prefetchDepth = configuration.jobConfiguration(for: projects[nextIndex]).localPrefetchScanDepth
             await projectPrefetcher(projects[nextIndex].sourceURL, configuration.transferPolicy, prefetchDepth)
+            try await pauseController.checkpoint()
             prefetchedProjectSourcePaths.insert(projects[nextIndex].sourceURL.standardizedFileURL.path)
             let hint = "Project directory warmup requested."
             if projects[nextIndex].detail?.contains(hint) != true {

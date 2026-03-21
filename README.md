@@ -4,6 +4,20 @@ Native macOS utility for turning iCloud Drive project trees into verified local 
 
 The app is built for large coding-project folders that may contain iCloud placeholders, generated caches, hidden files, and long-running copy operations. It does not rely on Finder scripting for the normal path. Finder automation is only used as a recovery fallback when direct file-coordinated access stalls or fails.
 
+## Why This Exists
+
+Large iCloud Drive project trees often fail in a very specific way: the machine looks mostly idle while the restore still feels stuck. CPU, RAM, and local disk may all appear underused because the real gate is usually Apple's File Provider scheduling and how aggressively the client asks iCloud to hydrate cold placeholders.
+
+That was also the main bottleneck in this project. The rescue app was already parallel once files had been discovered and chunked, but the earlier single-project path only pushed iCloud hydration from one top-level directory at a time. For very large coding trees, that meant our own pipeline was underfeeding Apple's downloader long before CPU or SSD throughput became relevant.
+
+`iCloud Materializer` is the rescue layer around that limitation. It does not replace iCloud Drive. It adds the pieces Apple's default UX does not give you for this scenario:
+- mandatory preflight so misconfigured system state is caught before a long run
+- shallow-first discovery so useful work starts earlier
+- explicit hydration telemetry for queued, downloading, stalled, and request-failed items
+- bounded parallel warmup of multiple top-level directories in aggressive mode
+- staged copy plus verification before anything becomes the visible target
+- persistent logs and resume state for post-mortem debugging and retries
+
 Current operational change history lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Versioning
@@ -34,6 +48,7 @@ Implemented today:
 - coalesced UI update delivery and large-queue rendering guards so long batch runs stay observable without stalling the rescue workers
 - mandatory preflight before rescue runs start
 - shallow-first discovery, hydration, staged copy, verification, and promotion
+- aggressive rescue warmup that can request hydration across multiple top-level directories in parallel
 - live telemetry, logs, failures, stall warnings, and hydration-state timing
 - transfer scope presets for exact copies vs. coding-project copies
 - priority presets for critical files first
@@ -48,6 +63,14 @@ Not implemented yet:
 - CI workflows in `.github/`
 
 ## What The App Does
+
+At a high level, the app solves two separate problems:
+
+1. It makes iCloud rescue observable.
+   Instead of a black-box Finder experience, the app records preflight state, hydration requests, queue pressure, chunk progress, failures, and persistent logs.
+
+2. It keeps the rescue path strict.
+   The app only reports success after a verified local copy exists in the visible destination. ZIP creation and any source cleanup are intentionally outside the critical path.
 
 For a single project run, the app executes this pipeline:
 
@@ -214,6 +237,7 @@ What is logged:
 Operational rule:
 - when a run fails or the app appears to crash, inspect `latest.log.jsonl` first
 - keep the log file together with the exported SQLite/job state when reporting or debugging rescue failures
+- pause and cancel should now react during long discovery and verification phases too, not only during copy or hydration loops
 
 Run-health thresholds:
 - watch after 90 seconds without progress
@@ -274,7 +298,7 @@ The generated Xcode project should be treated as derived from [project.yml](proj
 - source deletion is still a manual follow-up step; the app only prepares deletion manifests when archive creation is enabled
 - there is no dedicated deletion review or execute workflow yet
 - Finder fallback can still be fragile on very large or changing trees because it depends on macOS Automation and Finder stability
-- throughput depends heavily on iCloud/File Provider behavior; this version deliberately starts with conservative concurrency and favors predictability over saturation
+- throughput still depends heavily on iCloud/File Provider behavior; aggressive mode now prewarms up to eight top-level directories in parallel, but the final download rate is still ultimately gated by Apple's File Provider stack and may not show up as high CPU usage inside this app process
 - batch copy is still promoted one project at a time; the speed-up now comes mainly from shallow-first discovery, earlier usable progress, and fewer cold items blocking hot work
 - single-project retries can reuse persisted discovery inventory, but they do not yet resume already copied/promoted chunk state at sub-phase granularity
 - the current batch resume model is queue-oriented; it does not yet expose a dedicated UI for repairing a partially successful single project at sub-phase granularity

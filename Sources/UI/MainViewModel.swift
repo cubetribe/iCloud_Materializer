@@ -305,6 +305,7 @@ final class MainViewModel {
     func cancel() {
         guard let pauseController else { return }
         AppSessionLog.shared.append(level: .warning, category: "ui", message: "Cancellation requested by user")
+        isPaused = false
         Task {
             await pauseController.cancel()
         }
@@ -532,6 +533,12 @@ final class MainViewModel {
                 lastProgressAt = Date()
             }
             self.snapshot = snapshot
+            switch snapshot.phase {
+            case .completed, .completedWithWarnings, .failed, .cancelled, .idle:
+                isPaused = false
+            default:
+                break
+            }
         case .log(let entry):
             lastProgressAt = entry.createdAt
             logs.append(entry)
@@ -553,6 +560,12 @@ final class MainViewModel {
                 lastProgressAt = Date()
             }
             self.batchSnapshot = snapshot
+            switch snapshot.state {
+            case .idle, .completed, .completedWithWarnings, .failed, .cancelled:
+                isPaused = false
+            case .running:
+                break
+            }
         case .batchProjects(let projects):
             if projects != self.batchProjects {
                 lastProgressAt = Date()

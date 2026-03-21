@@ -328,20 +328,77 @@ final class MaterializerCoordinatorTests: XCTestCase {
         XCTAssertFalse(fileManager.fileExists(atPath: visibleTarget.appendingPathComponent("_Materializer_Archives", isDirectory: true).path))
     }
 
+    func testCoordinatorAggressiveProfilePrewarmsTopLevelDirectoriesInParallel() async throws {
+        let fileManager = FileManager.default
+        let workspace = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sourceRoot = workspace.appendingPathComponent("SourceProject", isDirectory: true)
+        let destinationRoot = workspace.appendingPathComponent("Destination", isDirectory: true)
+        try fileManager.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: workspace) }
+
+        try createFixture(at: sourceRoot)
+        for directoryName in ["docs", "scripts"] {
+            let directoryURL = sourceRoot.appendingPathComponent(directoryName, isDirectory: true)
+            try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            try Data(directoryName.utf8).write(to: directoryURL.appendingPathComponent("fixture.txt", isDirectory: false))
+        }
+
+        let recorder = UpdateRecorder()
+        let warmupRecorder = WarmupRecorder()
+        let coordinator = MaterializerCoordinator(
+            directoryWarmupHook: { directory, _, pauseController, _, _ in
+                try await pauseController.checkpoint()
+                await warmupRecorder.begin(directory.relativePath)
+                do {
+                    try await Task.sleep(for: .milliseconds(120))
+                    await warmupRecorder.end(directory.relativePath)
+                } catch {
+                    await warmupRecorder.end(directory.relativePath)
+                    throw error
+                }
+            }
+        )
+
+        await coordinator.run(
+            configuration: makeConfiguration(
+                sourceRoot: sourceRoot,
+                destinationRoot: destinationRoot,
+                rescueProfile: .aggressive,
+                workerCount: 3
+            ),
+            pauseController: PauseController()
+        ) { update in
+            await recorder.record(update)
+        }
+
+        let snapshot = await recorder.lastSnapshot()
+        let warmupSnapshot = await warmupRecorder.snapshot()
+        let logMessages = await recorder.logMessages()
+
+        XCTAssertEqual(snapshot?.phase, .completed)
+        XCTAssertEqual(Set(warmupSnapshot.paths), Set(["backend", "frontend", "docs", "scripts"]))
+        XCTAssertEqual(warmupSnapshot.maxConcurrent, 3)
+        XCTAssertTrue(logMessages.contains(where: { $0.contains("Requesting iCloud warmup for 4 top-level directories with concurrency 3") }))
+    }
+
     private func makeConfiguration(
         sourceRoot: URL,
         destinationRoot: URL,
         shouldCreateArchive: Bool = false,
-        preflightReport: PreflightReport? = nil
+        preflightReport: PreflightReport? = nil,
+        rescueProfile: RescueProfile = .conservative,
+        workerCount: Int = 2
     ) -> JobConfiguration {
         JobConfiguration(
             jobID: UUID(),
             sourceURL: sourceRoot,
             destinationURL: destinationRoot,
             preflightReport: preflightReport,
+            rescueProfile: rescueProfile,
             transferPolicy: .exactCopy,
             priorityPolicy: .naturalOrder,
-            workerCount: 2,
+            workerCount: workerCount,
             hydrationWindow: 4,
             retryCount: 1,
             backoffSchedule: [.seconds(0), .seconds(1)],
@@ -391,5 +448,26 @@ private actor UpdateRecorder {
 
     func logMessages() -> [String] {
         logs.map(\.message)
+    }
+}
+
+private actor WarmupRecorder {
+    private var activeCount = 0
+    private var maxConcurrent = 0
+    private var startedPaths: [String] = []
+
+    func begin(_ path: String) {
+        activeCount += 1
+        maxConcurrent = max(maxConcurrent, activeCount)
+        startedPaths.append(path)
+    }
+
+    func end(_ path: String) {
+        _ = path
+        activeCount = max(activeCount - 1, 0)
+    }
+
+    func snapshot() -> (paths: [String], maxConcurrent: Int) {
+        (startedPaths, maxConcurrent)
     }
 }

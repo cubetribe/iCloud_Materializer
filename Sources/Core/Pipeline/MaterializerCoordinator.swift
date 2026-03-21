@@ -11,11 +11,14 @@ final class MaterializerCoordinator: @unchecked Sendable {
     private let zipEngine = ZipEngine()
     private let logger = AppLogger()
     private let postPromotionHook: (@Sendable (URL) async throws -> Void)?
+    private let directoryWarmupHook: (@Sendable (ScannedItem, JobConfiguration, PauseController, JobStore, @escaping @Sendable (JobUpdate) async -> Void) async throws -> Void)?
 
     init(
-        postPromotionHook: (@Sendable (URL) async throws -> Void)? = nil
+        postPromotionHook: (@Sendable (URL) async throws -> Void)? = nil,
+        directoryWarmupHook: (@Sendable (ScannedItem, JobConfiguration, PauseController, JobStore, @escaping @Sendable (JobUpdate) async -> Void) async throws -> Void)? = nil
     ) {
         self.postPromotionHook = postPromotionHook
+        self.directoryWarmupHook = directoryWarmupHook
     }
 
     func run(
@@ -89,6 +92,15 @@ final class MaterializerCoordinator: @unchecked Sendable {
                 store: store,
                 onUpdate: onUpdate
             )
+            if configuration.topLevelWarmupConcurrency > 0 {
+                await log(
+                    .info,
+                    "Top-level directory warmup concurrency: up to \(configuration.topLevelWarmupConcurrency) directory roots in parallel",
+                    jobID: configuration.jobID,
+                    store: store,
+                    onUpdate: onUpdate
+                )
+            }
             for warning in configuration.transferPolicy.ignoredCustomRules {
                 await log(
                     .warning,
@@ -163,7 +175,8 @@ final class MaterializerCoordinator: @unchecked Sendable {
 
                 let topLevelItems = try await scanEngine.scanTopLevel(
                     sourceRoot: configuration.sourceURL,
-                    transferPolicy: configuration.transferPolicy
+                    transferPolicy: configuration.transferPolicy,
+                    pauseController: pauseController
                 ) { item in
                     try? await tracker.scanned(item)
                 }
@@ -178,6 +191,14 @@ final class MaterializerCoordinator: @unchecked Sendable {
                     )
                 }
                 var allItemsByPath = Dictionary(uniqueKeysWithValues: topLevelItems.map { ($0.relativePath, $0) })
+                let topLevelDirectories = topLevelItems.filter { $0.kind == .directory }
+                try await prewarmTopLevelDirectoriesIfNeeded(
+                    topLevelDirectories,
+                    configuration: configuration,
+                    pauseController: pauseController,
+                    store: store,
+                    onUpdate: onUpdate
+                )
                 let rootFiles = topLevelItems.filter { $0.kind != .directory }
                 if !rootFiles.isEmpty {
                     let outcomes = try await processDiscoveredItems(
@@ -194,13 +215,8 @@ final class MaterializerCoordinator: @unchecked Sendable {
                 }
 
                 if failures.isEmpty {
-                    for directory in topLevelItems where directory.kind == .directory {
-                        await requestDirectoryWarmupIfNeeded(
-                            for: directory,
-                            configuration: configuration,
-                            store: store,
-                            onUpdate: onUpdate
-                        )
+                    for directory in topLevelDirectories {
+                        try await pauseController.checkpoint()
                         try await tracker.updateTopLevelPhase(
                             .discovering,
                             detail: "Discovering \(directory.relativePath)",
@@ -210,7 +226,8 @@ final class MaterializerCoordinator: @unchecked Sendable {
                         let subtreeItems = try await scanEngine.scanSubtree(
                             sourceRoot: configuration.sourceURL,
                             anchorRelativePath: directory.relativePath,
-                            transferPolicy: configuration.transferPolicy
+                            transferPolicy: configuration.transferPolicy,
+                            pauseController: pauseController
                         ) { item in
                             try? await tracker.scanned(item)
                         }
@@ -249,7 +266,8 @@ final class MaterializerCoordinator: @unchecked Sendable {
                 expectedItems: items,
                 at: workingDirectories.assembledRoot,
                 detail: "Verifying assembled target",
-                tracker: tracker
+                tracker: tracker,
+                pauseController: pauseController
             )
             await log(
                 .info,
@@ -278,7 +296,8 @@ final class MaterializerCoordinator: @unchecked Sendable {
                 expectedItems: items,
                 at: configuration.visibleTargetURL,
                 detail: "Verifying visible target",
-                tracker: tracker
+                tracker: tracker,
+                pauseController: pauseController
             )
             await log(
                 .info,
@@ -494,6 +513,14 @@ final class MaterializerCoordinator: @unchecked Sendable {
         let grouping = topLevelGroups(from: items)
         var outcomes: [ChunkOutcome] = []
 
+        try await prewarmTopLevelDirectoriesIfNeeded(
+            grouping.directories.map(\.directory),
+            configuration: configuration,
+            pauseController: pauseController,
+            store: store,
+            onUpdate: onUpdate
+        )
+
         if !grouping.rootFiles.isEmpty {
             outcomes.append(contentsOf: try await processDiscoveredItems(
                 grouping.rootFiles,
@@ -678,7 +705,11 @@ final class MaterializerCoordinator: @unchecked Sendable {
                 detail: "Verifying staged chunk",
                 path: chunk.anchorRelativePath ?? chunk.relativePaths.first
             )
-            _ = try await verificationEngine.verify(expectedItems: report.items, at: stageRoot) { path in
+            _ = try await verificationEngine.verify(
+                expectedItems: report.items,
+                at: stageRoot,
+                pauseController: pauseController
+            ) { path in
                 try? await tracker.updateWorker(
                     id: chunk.id,
                     label: workerLabel,
@@ -695,7 +726,11 @@ final class MaterializerCoordinator: @unchecked Sendable {
                 detail: "Promoting verified chunk",
                 path: chunk.anchorRelativePath ?? chunk.relativePaths.first
             )
-            try await promotionEngine.promoteChunk(from: stageRoot, into: workingDirectories.assembledRoot)
+            try await promotionEngine.promoteChunk(
+                from: stageRoot,
+                into: workingDirectories.assembledRoot,
+                pauseController: pauseController
+            )
             try await tracker.markChunkFinished()
             try await tracker.clearWorker(id: chunk.id)
 
@@ -763,7 +798,11 @@ final class MaterializerCoordinator: @unchecked Sendable {
                     detail: "Verifying recovery copy result",
                     path: chunk.anchorRelativePath ?? chunk.relativePaths.first
                 )
-                _ = try await verificationEngine.verify(expectedItems: items, at: stageRoot) { path in
+                _ = try await verificationEngine.verify(
+                    expectedItems: items,
+                    at: stageRoot,
+                    pauseController: pauseController
+                ) { path in
                     try? await tracker.updateWorker(
                         id: chunk.id,
                         label: workerLabel,
@@ -779,7 +818,11 @@ final class MaterializerCoordinator: @unchecked Sendable {
                     detail: "Promoting recovery copy result",
                     path: chunk.anchorRelativePath ?? chunk.relativePaths.first
                 )
-                try await promotionEngine.promoteChunk(from: stageRoot, into: workingDirectories.assembledRoot)
+                try await promotionEngine.promoteChunk(
+                    from: stageRoot,
+                    into: workingDirectories.assembledRoot,
+                    pauseController: pauseController
+                )
                 for item in items {
                     try? await tracker.markCopied(item: item)
                 }
@@ -874,15 +917,21 @@ final class MaterializerCoordinator: @unchecked Sendable {
         expectedItems: [ScannedItem],
         at root: URL,
         detail: String,
-        tracker: ProgressTracker
+        tracker: ProgressTracker,
+        pauseController: PauseController
     ) async throws -> VerificationResult {
+        try await pauseController.checkpoint()
         try await tracker.updateTopLevelPhase(
             .finalVerifying,
             detail: detail,
             path: root.path,
             force: true
         )
-        return try await verificationEngine.verify(expectedItems: expectedItems, at: root) { path in
+        return try await verificationEngine.verify(
+            expectedItems: expectedItems,
+            at: root,
+            pauseController: pauseController
+        ) { path in
             try? await tracker.updateTopLevelPhase(
                 .finalVerifying,
                 detail: detail,
@@ -944,13 +993,92 @@ final class MaterializerCoordinator: @unchecked Sendable {
         return (rootFiles, directories)
     }
 
+    private func prewarmTopLevelDirectoriesIfNeeded(
+        _ directories: [ScannedItem],
+        configuration: JobConfiguration,
+        pauseController: PauseController,
+        store: JobStore,
+        onUpdate: @escaping @Sendable (JobUpdate) async -> Void
+    ) async throws {
+        guard configuration.topLevelWarmupConcurrency > 0 else { return }
+        guard !directories.isEmpty else { return }
+
+        let concurrency = min(configuration.topLevelWarmupConcurrency, directories.count)
+        await log(
+            .info,
+            "Requesting iCloud warmup for \(directories.count) top-level directories with concurrency \(concurrency)",
+            jobID: configuration.jobID,
+            store: store,
+            onUpdate: onUpdate,
+            path: configuration.sourceURL.path
+        )
+
+        var iterator = directories.makeIterator()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<concurrency {
+                guard let directory = iterator.next() else { break }
+                group.addTask { [self] in
+                    try await performDirectoryWarmup(
+                        for: directory,
+                        configuration: configuration,
+                        pauseController: pauseController,
+                        store: store,
+                        onUpdate: onUpdate
+                    )
+                }
+            }
+
+            while try await group.next() != nil {
+                guard let directory = iterator.next() else { continue }
+                group.addTask { [self] in
+                    try await performDirectoryWarmup(
+                        for: directory,
+                        configuration: configuration,
+                        pauseController: pauseController,
+                        store: store,
+                        onUpdate: onUpdate
+                    )
+                }
+            }
+        }
+    }
+
+    private func performDirectoryWarmup(
+        for directory: ScannedItem,
+        configuration: JobConfiguration,
+        pauseController: PauseController,
+        store: JobStore,
+        onUpdate: @escaping @Sendable (JobUpdate) async -> Void
+    ) async throws {
+        if let directoryWarmupHook {
+            try await directoryWarmupHook(
+                directory,
+                configuration,
+                pauseController,
+                store,
+                onUpdate
+            )
+            return
+        }
+
+        try await requestDirectoryWarmupIfNeeded(
+            for: directory,
+            configuration: configuration,
+            pauseController: pauseController,
+            store: store,
+            onUpdate: onUpdate
+        )
+    }
+
     private func requestDirectoryWarmupIfNeeded(
         for directory: ScannedItem,
         configuration: JobConfiguration,
+        pauseController: PauseController,
         store: JobStore,
         onUpdate: @escaping @Sendable (JobUpdate) async -> Void
-    ) async {
+    ) async throws {
         guard configuration.rescueProfile == .aggressive else { return }
+        try await pauseController.checkpoint()
 
         let directoryURL = configuration.sourceURL.appendingPathComponent(directory.relativePath, isDirectory: true)
         let candidateLimit = BatchCoordinator.prefetchCandidateLimit(scanDepth: configuration.localPrefetchScanDepth)
@@ -963,6 +1091,7 @@ final class MaterializerCoordinator: @unchecked Sendable {
 
         var requestedCount = 0
         for candidate in candidates {
+            try await pauseController.checkpoint()
             guard let values = try? candidate.resourceValues(forKeys: resourceKeys),
                   values.isUbiquitousItem == true else {
                 continue

@@ -34,10 +34,11 @@ actor PromotionEngine {
         try fileManager.moveItem(at: visibleTarget, to: quarantineURL)
     }
 
-    func promoteChunk(from stageRoot: URL, into assembledRoot: URL) throws {
+    func promoteChunk(from stageRoot: URL, into assembledRoot: URL, pauseController: PauseController? = nil) async throws {
         guard fileManager.fileExists(atPath: stageRoot.path) else { return }
         let subpaths = try fileManager.subpathsOfDirectory(atPath: stageRoot.path).sorted()
         for subpath in subpaths {
+            try await checkpoint(pauseController)
             let sourceURL = stageRoot.appendingPathComponent(subpath)
             let destinationURL = assembledRoot.appendingPathComponent(subpath)
             let values = try sourceURL.resourceValues(forKeys: [.isDirectoryKey])
@@ -50,6 +51,7 @@ actor PromotionEngine {
             }
             try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try fileManager.moveItem(at: sourceURL, to: destinationURL)
+            try await checkpoint(pauseController)
         }
     }
 
@@ -58,5 +60,13 @@ actor PromotionEngine {
             throw PipelineError.promotionConflict(visibleTarget)
         }
         try fileManager.moveItem(at: assembledRoot, to: visibleTarget)
+    }
+
+    private func checkpoint(_ pauseController: PauseController?) async throws {
+        try Task.checkCancellation()
+        if let pauseController {
+            try await pauseController.checkpoint()
+        }
+        try Task.checkCancellation()
     }
 }

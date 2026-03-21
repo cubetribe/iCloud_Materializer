@@ -6,18 +6,21 @@ struct VerificationEngine: Sendable {
     func verify(
         expectedItems: [ScannedItem],
         at root: URL,
+        pauseController: PauseController? = nil,
         onProgress: (@Sendable (String) async -> Void)? = nil
     ) async throws -> VerificationResult {
         let fileManager = FileManager.default
         let expectedMap = Dictionary(uniqueKeysWithValues: expectedItems.map { ($0.relativePath, $0) })
-        let actualMap = try buildActualInventory(root: root, fileManager: fileManager)
+        let actualMap = try await buildActualInventory(root: root, fileManager: fileManager, pauseController: pauseController)
         var mismatches: [String] = []
         var verifiedBytes: Int64 = 0
 
         for item in expectedItems {
+            try await checkpoint(pauseController)
             if let onProgress {
                 await onProgress(item.relativePath)
             }
+            try await checkpoint(pauseController)
             guard let actual = actualMap[item.relativePath] else {
                 mismatches.append("Missing item: \(item.relativePath)")
                 continue
@@ -54,7 +57,11 @@ struct VerificationEngine: Sendable {
         return VerificationResult(verifiedCount: expectedItems.count, verifiedBytes: verifiedBytes)
     }
 
-    private func buildActualInventory(root: URL, fileManager: FileManager) throws -> [String: ScannedItem] {
+    private func buildActualInventory(
+        root: URL,
+        fileManager: FileManager,
+        pauseController: PauseController?
+    ) async throws -> [String: ScannedItem] {
         guard let enumerator = fileManager.enumerator(
             at: root,
             includingPropertiesForKeys: Array(resourceKeys),
@@ -65,7 +72,8 @@ struct VerificationEngine: Sendable {
         }
 
         var items: [String: ScannedItem] = [:]
-        for case let url as URL in enumerator {
+        while let url = enumerator.nextObject() as? URL {
+            try await checkpoint(pauseController)
             let relativePath = normalizedRelativePath(for: url, root: root)
             guard !relativePath.isEmpty else { continue }
             let values = try url.resourceValues(forKeys: resourceKeys)
@@ -86,6 +94,7 @@ struct VerificationEngine: Sendable {
                 state: .copied,
                 lastError: nil
             )
+            try await checkpoint(pauseController)
         }
         return items
     }
@@ -101,5 +110,13 @@ struct VerificationEngine: Sendable {
     private func shouldIgnoreExtra(path: String) -> Bool {
         let lastComponent = URL(fileURLWithPath: path).lastPathComponent
         return lastComponent == ".DS_Store" || lastComponent.hasPrefix("._")
+    }
+
+    private func checkpoint(_ pauseController: PauseController?) async throws {
+        try Task.checkCancellation()
+        if let pauseController {
+            try await pauseController.checkpoint()
+        }
+        try Task.checkCancellation()
     }
 }

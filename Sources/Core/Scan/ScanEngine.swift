@@ -15,6 +15,7 @@ actor ScanEngine {
     func scanTopLevel(
         sourceRoot: URL,
         transferPolicy: TransferPolicy,
+        pauseController: PauseController? = nil,
         onItem: (@Sendable (ScannedItem) async -> Void)? = nil
     ) async throws -> [ScannedItem] {
         let children = try fileManager.contentsOfDirectory(
@@ -25,6 +26,7 @@ actor ScanEngine {
 
         var items: [ScannedItem] = []
         for url in children.sorted(by: { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }) {
+            try await checkpoint(pauseController)
             let relativePath = normalizedRelativePath(for: url, sourceRoot: sourceRoot)
             guard !relativePath.isEmpty else { continue }
             let item = try buildItem(for: url, relativePath: relativePath, transferPolicy: transferPolicy)
@@ -33,6 +35,7 @@ actor ScanEngine {
             if let onItem {
                 await onItem(item)
             }
+            try await checkpoint(pauseController)
         }
         return items
     }
@@ -41,6 +44,7 @@ actor ScanEngine {
         sourceRoot: URL,
         anchorRelativePath: String,
         transferPolicy: TransferPolicy,
+        pauseController: PauseController? = nil,
         onItem: (@Sendable (ScannedItem) async -> Void)? = nil
     ) async throws -> [ScannedItem] {
         let subtreeURL = sourceRoot.appendingPathComponent(anchorRelativePath, isDirectory: true)
@@ -55,6 +59,7 @@ actor ScanEngine {
 
         var items: [ScannedItem] = []
         while let url = enumerator.nextObject() as? URL {
+            try await checkpoint(pauseController)
             let relativePath = normalizedRelativePath(for: url, sourceRoot: sourceRoot)
             guard !relativePath.isEmpty, relativePath != anchorRelativePath else { continue }
             let values = try url.resourceValues(forKeys: resourceKeys)
@@ -75,6 +80,7 @@ actor ScanEngine {
             if let onItem {
                 await onItem(item)
             }
+            try await checkpoint(pauseController)
         }
         return items.sorted { $0.relativePath < $1.relativePath }
     }
@@ -82,6 +88,7 @@ actor ScanEngine {
     func scan(
         sourceRoot: URL,
         transferPolicy: TransferPolicy,
+        pauseController: PauseController? = nil,
         onItem: (@Sendable (ScannedItem) async -> Void)? = nil
     ) async throws -> [ScannedItem] {
         guard let enumerator = fileManager.enumerator(
@@ -95,6 +102,7 @@ actor ScanEngine {
 
         var items: [ScannedItem] = []
         while let url = enumerator.nextObject() as? URL {
+            try await checkpoint(pauseController)
             let relativePath = normalizedRelativePath(for: url, sourceRoot: sourceRoot)
             guard !relativePath.isEmpty else { continue }
             let values = try url.resourceValues(forKeys: resourceKeys)
@@ -115,6 +123,7 @@ actor ScanEngine {
             if let onItem {
                 await onItem(item)
             }
+            try await checkpoint(pauseController)
         }
         return items.sorted { $0.relativePath < $1.relativePath }
     }
@@ -165,6 +174,14 @@ actor ScanEngine {
         let startIndex = itemPath.index(itemPath.startIndex, offsetBy: sourcePath.count)
         let raw = String(itemPath[startIndex...])
         return raw.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    private func checkpoint(_ pauseController: PauseController?) async throws {
+        try Task.checkCancellation()
+        if let pauseController {
+            try await pauseController.checkpoint()
+        }
+        try Task.checkCancellation()
     }
 
     private func buildItem(
